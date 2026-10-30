@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Unit tests
+        run: uv run pytest tests/ -v --ignore=tests/test_container_integration.py
+
+  integration:
+    runs-on: ubuntu-latest
+    # Docker is preinstalled on GitHub-hosted ubuntu-latest runners, so
+    # the sandbox's real Docker-dependent tests can run here even though
+    # they can't run in the authoring environment. This job is what
+    # finally gives this project real CI-verified proof the sandbox
+    # works, not just local claims.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Sandbox integration test
+        run: uv run pytest tests/test_container_integration.py -v

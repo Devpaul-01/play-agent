@@ -105,11 +105,10 @@ def test_missing_app_path_raises_before_container_starts(tmp_path):
     )
     mock_client = MagicMock()
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), pytest.raises(
-        SandboxError, match="does not exist"
-    ):
-        with Sandbox(config):
-            pass
+    with patch(
+        "play_agent.sandbox.container.docker.from_env", return_value=mock_client
+    ), pytest.raises(SandboxError, match="does not exist"), Sandbox(config):
+        pass
 
     mock_client.containers.run.assert_not_called()
 
@@ -119,11 +118,10 @@ def test_teardown_called_even_when_body_raises(config):
     mock_container = MagicMock()
     mock_client.containers.run.return_value = mock_container
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), pytest.raises(
-        ValueError
-    ):
-        with Sandbox(config):
-            raise ValueError("simulated failure mid-run")
+    with patch(
+        "play_agent.sandbox.container.docker.from_env", return_value=mock_client
+    ), pytest.raises(ValueError), Sandbox(config):
+        raise ValueError("simulated failure mid-run")
 
     mock_container.remove.assert_called_once_with(force=True)
 
@@ -134,11 +132,10 @@ def test_teardown_swallows_docker_api_error_but_not_body_exception(config):
     mock_container.remove.side_effect = APIError("daemon unreachable")
     mock_client.containers.run.return_value = mock_container
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), pytest.raises(
-        ValueError, match="original error"
-    ):
-        with Sandbox(config):
-            raise ValueError("original error")
+    with patch(
+        "play_agent.sandbox.container.docker.from_env", return_value=mock_client
+    ), pytest.raises(ValueError, match="original error"), Sandbox(config):
+        raise ValueError("original error")
 
 
 def test_exec_run_before_start_raises():
@@ -174,9 +171,8 @@ def test_exec_run_times_out_on_hung_command(config):
 
     with patch(
         "play_agent.sandbox.container.docker.from_env", return_value=mock_client
-    ), Sandbox(fast_timeout_config) as sandbox:
-        with pytest.raises(SandboxError, match="timed out"):
-            sandbox.exec_run(["sleep", "10"])
+    ), Sandbox(fast_timeout_config) as sandbox, pytest.raises(SandboxError, match="timed out"):
+        sandbox.exec_run(["sleep", "10"])
 
 
 def test_docker_daemon_unreachable_raises_sandbox_error(config):

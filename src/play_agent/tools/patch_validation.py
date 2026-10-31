@@ -40,12 +40,6 @@ ALLOWED_LOCATOR_METHODS = frozenset(
     }
 )
 
-# Per-method argument shape. Each entry is the number of positional
-# arguments expected and whether a trailing options object is allowed.
-# This exists because "literal string only" (the original, too-narrow
-# rule) is wrong for nth (takes a number) and filter (takes an object) --
-# different methods have different legitimate Playwright signatures, and
-# pretending they're all the same shape is what caused this bug.
 _NO_ARGS = {"first", "last"}
 _ONE_STRING_ARG = {
     "getByTestId",
@@ -57,8 +51,6 @@ _ONE_STRING_ARG = {
     "locator",
 }
 _ONE_NUMBER_ARG = {"nth"}
-# getByRole: one string (the role) + optional options object.
-# filter: one options object, no positional string.
 _STRING_PLUS_OPTIONAL_OPTIONS = {"getByRole"}
 _OPTIONS_OBJECT_ONLY = {"filter"}
 
@@ -165,9 +157,6 @@ def _validate_call_chain(node: Node) -> ValidationResult:
         return arg_check
 
     if receiver is None or receiver_type == "identifier":
-        # Base of the chain: `page.getByX(...)`. The receiver itself
-        # (`page`) is not further validated -- it's not user-controlled
-        # text, it's the fixed object every locator chain starts from.
         return ValidationResult(valid=True)
 
     if receiver_type == "call_expression":
@@ -177,9 +166,6 @@ def _validate_call_chain(node: Node) -> ValidationResult:
 
 
 def _validate_arguments_for_method(method_name: str, args: list[Node]) -> ValidationResult:
-    """Validate an argument list against the shape expected for this
-    specific method -- not a single blanket rule for all methods."""
-
     if method_name in _NO_ARGS:
         if args:
             return ValidationResult(valid=False, reason=f"{method_name} takes no arguments")
@@ -217,8 +203,6 @@ def _validate_arguments_for_method(method_name: str, args: list[Node]) -> Valida
             )
         return _validate_safe_object_literal(args[0])
 
-    # Should be unreachable given ALLOWED_LOCATOR_METHODS is checked first,
-    # but fail closed rather than silently accept an unhandled method.
     return ValidationResult(valid=False, reason=f"no argument rule defined for '{method_name}'")
 
 
@@ -235,11 +219,6 @@ def _is_number_literal(node: Node) -> bool:
 
 
 def _validate_safe_object_literal(node: Node) -> ValidationResult:
-    """Validate an object literal argument (e.g. filter's { hasText: ... }):
-    every value must itself be a safe literal -- string, number, boolean,
-    or a nested safe object/array of the same -- never an identifier,
-    function call, or anything that could reference outside state."""
-
     if node.type != "object":
         return ValidationResult(valid=False, reason=f"expected an object literal, found {node.type}")
 
@@ -264,11 +243,7 @@ def _is_safe_literal_value(node: Node) -> bool:
         return _validate_safe_object_literal(node).valid
     if node.type == "array":
         return all(_is_safe_literal_value(child) for child in node.named_children)
-    # Regex literals are a legitimate Playwright pattern (e.g. hasText with
-    # a regex) and contain no executable code, so allow them explicitly.
-    if node.type == "regex":
-        return True
-    return False
+    return node.type == "regex"
 
 
 def resolve_locator_call(source: str, locator_call_id: str) -> LocatableCall | None:

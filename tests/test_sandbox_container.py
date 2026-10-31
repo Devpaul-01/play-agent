@@ -11,7 +11,7 @@ alone is not sufficient evidence the sandbox works.
 
 from __future__ import annotations
 
-import concurrent.futures
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -36,9 +36,8 @@ def test_start_mounts_exactly_app_and_output_dirs(config):
     mock_client = MagicMock()
     mock_client.containers.run.return_value = MagicMock()
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client):
-        with Sandbox(config):
-            pass
+    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
+        pass
 
     call_kwargs = mock_client.containers.run.call_args.kwargs
     volumes = call_kwargs["volumes"]
@@ -48,16 +47,11 @@ def test_start_mounts_exactly_app_and_output_dirs(config):
 
 
 def test_start_uses_bridge_network_with_host_gateway(config):
-    # Replaces the old (buggy) assertion that network_mode == "none" --
-    # "none" has no route to anything, including the host, which was the
-    # actual bug. The corrected version uses a real bridge network plus
-    # Docker's host-gateway mechanism to reach the host machine.
     mock_client = MagicMock()
     mock_client.containers.run.return_value = MagicMock()
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client):
-        with Sandbox(config):
-            pass
+    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
+        pass
 
     call_kwargs = mock_client.containers.run.call_args.kwargs
     assert call_kwargs["network_mode"] == "bridge"
@@ -65,27 +59,17 @@ def test_start_uses_bridge_network_with_host_gateway(config):
 
 
 def test_localhost_app_host_rewritten_to_host_gateway(config):
-    # app_host="localhost" (the common case: app runs as a local dev
-    # server) must be rewritten to host.docker.internal in the URL passed
-    # into the container -- 127.0.0.1/localhost INSIDE the container would
-    # mean the container itself, never the host.
     mock_client = MagicMock()
     mock_client.containers.run.return_value = MagicMock()
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client):
-        with Sandbox(config):
-            pass
+    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
+        pass
 
     call_kwargs = mock_client.containers.run.call_args.kwargs
     assert call_kwargs["environment"]["APP_UNDER_TEST_URL"] == "http://host.docker.internal:5173"
 
 
 def test_non_local_app_host_left_unrewritten(tmp_path):
-    # A real external hostname (e.g. a staging URL) must NOT be forced
-    # through the host-gateway rewrite -- that path only applies when the
-    # app is local relative to the sandbox runner. This is the
-    # general-purpose guarantee: play-agent must not assume every
-    # app-under-test runs on the same machine as play-agent itself.
     app_dir = tmp_path / "app"
     app_dir.mkdir()
     config = SandboxConfig(
@@ -94,9 +78,8 @@ def test_non_local_app_host_left_unrewritten(tmp_path):
     mock_client = MagicMock()
     mock_client.containers.run.return_value = MagicMock()
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client):
-        with Sandbox(config):
-            pass
+    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
+        pass
 
     call_kwargs = mock_client.containers.run.call_args.kwargs
     assert call_kwargs["environment"]["APP_UNDER_TEST_URL"] == "http://staging.example.com:443"
@@ -106,9 +89,8 @@ def test_start_drops_all_capabilities(config):
     mock_client = MagicMock()
     mock_client.containers.run.return_value = MagicMock()
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client):
-        with Sandbox(config):
-            pass
+    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
+        pass
 
     call_kwargs = mock_client.containers.run.call_args.kwargs
     assert call_kwargs["cap_drop"] == ["ALL"]
@@ -123,10 +105,11 @@ def test_missing_app_path_raises_before_container_starts(tmp_path):
     )
     mock_client = MagicMock()
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client):
-        with pytest.raises(SandboxError, match="does not exist"):
-            with Sandbox(config):
-                pass
+    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), pytest.raises(
+        SandboxError, match="does not exist"
+    ):
+        with Sandbox(config):
+            pass
 
     mock_client.containers.run.assert_not_called()
 
@@ -136,10 +119,11 @@ def test_teardown_called_even_when_body_raises(config):
     mock_container = MagicMock()
     mock_client.containers.run.return_value = mock_container
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client):
-        with pytest.raises(ValueError):
-            with Sandbox(config):
-                raise ValueError("simulated failure mid-run")
+    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), pytest.raises(
+        ValueError
+    ):
+        with Sandbox(config):
+            raise ValueError("simulated failure mid-run")
 
     mock_container.remove.assert_called_once_with(force=True)
 
@@ -150,10 +134,11 @@ def test_teardown_swallows_docker_api_error_but_not_body_exception(config):
     mock_container.remove.side_effect = APIError("daemon unreachable")
     mock_client.containers.run.return_value = mock_container
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client):
-        with pytest.raises(ValueError, match="original error"):
-            with Sandbox(config):
-                raise ValueError("original error")
+    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), pytest.raises(
+        ValueError, match="original error"
+    ):
+        with Sandbox(config):
+            raise ValueError("original error")
 
 
 def test_exec_run_before_start_raises():
@@ -171,13 +156,8 @@ def test_exec_run_before_start_raises():
 
 
 def test_exec_run_times_out_on_hung_command(config):
-    # Confirms the timeout fix: a command that never returns must raise
-    # SandboxError rather than hang forever (which, before the fix, would
-    # also have meant __exit__ never runs and the container leaks).
-    import time
-
     def hanging_exec_run(*args, **kwargs):
-        time.sleep(5)  # longer than the configured timeout below
+        time.sleep(5)
 
     mock_client = MagicMock()
     mock_container = MagicMock()
@@ -192,18 +172,16 @@ def test_exec_run_times_out_on_hung_command(config):
         timeout_seconds=1,
     )
 
-    with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client):
-        with Sandbox(fast_timeout_config) as sandbox:
-            with pytest.raises(SandboxError, match="timed out"):
-                sandbox.exec_run(["sleep", "10"])
+    with patch(
+        "play_agent.sandbox.container.docker.from_env", return_value=mock_client
+    ), Sandbox(fast_timeout_config) as sandbox:
+        with pytest.raises(SandboxError, match="timed out"):
+            sandbox.exec_run(["sleep", "10"])
 
 
 def test_docker_daemon_unreachable_raises_sandbox_error(config):
-    # Consistency fix: Sandbox's own constructor failure must raise
-    # SandboxError, not leak docker's DockerException to the caller.
     with patch(
         "play_agent.sandbox.container.docker.from_env",
         side_effect=DockerException("daemon not reachable"),
-    ):
-        with pytest.raises(SandboxError, match="Docker daemon not reachable"):
-            Sandbox(config)
+    ), pytest.raises(SandboxError, match="Docker daemon not reachable"):
+        Sandbox(config)

@@ -1,4 +1,3 @@
-# src/play_agent/store/store.py
 """The Store interface: persistence for runs/attempts (architecture Sec13/14).
 
 Per Sec13: "Writes are synchronous at each state transition -- a crash
@@ -14,6 +13,7 @@ from __future__ import annotations
 import sqlite3
 from importlib import resources
 from pathlib import Path
+from typing import Self
 
 from play_agent.store.models import (
     Attempt,
@@ -47,7 +47,7 @@ class Store:
     def close(self) -> None:
         self._conn.close()
 
-    def __enter__(self) -> "Store":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc_info: object) -> None:

@@ -17,8 +17,8 @@ from dataclasses import replace as _dc_replace
 
 from play_agent.orchestrator.states import (
     DiagnosisCompleted,
-    EvidenceCollected,
     Event,
+    EvidenceCollected,
     PatchApplied,
     Phase,
     ProposalValidated,

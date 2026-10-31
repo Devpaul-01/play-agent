@@ -21,12 +21,13 @@ this against a real app.
 
 from __future__ import annotations
 
-import socket
+import concurrent.futures
 import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
+from typing import Self
 
 import docker
 from docker.errors import APIError, DockerException, ImageNotFound
@@ -42,10 +43,6 @@ class SandboxError(Exception):
 class SandboxConfig:
     image: str
     app_path: str
-    # Host and port the app-under-test is reachable at, from the
-    # perspective of wherever `play-agent` itself is running (i.e. from
-    # the Docker host's point of view) -- e.g. "localhost:5173". No
-    # assumption is made about what's actually serving that port.
     app_host: str
     app_port: int
     output_dir_container: str = "/output"
@@ -60,16 +57,8 @@ class Sandbox:
     a context manager so teardown is unconditional (Sec10) even on error.
     """
 
-    # The special DNS name Docker Desktop (Windows/Mac) and recent Docker
-    # Engine (Linux, 20.10+) resolve to the host machine from inside any
-    # container. This is the general-purpose mechanism for "reach
-    # whatever's running on the host" -- it makes no assumption about
-    # whether the app is a bare process, another container, or anything
-    # else. If app_host is already "localhost" or "127.0.0.1" (the common
-    # case when the app runs as a local dev server), we rewrite it to this
-    # name; if app_host is some other resolvable hostname (e.g. a staging
-    # URL), we leave it alone and let normal DNS handle it instead.
     _HOST_GATEWAY_NAME = "host.docker.internal"
+
     def __init__(self, config: SandboxConfig, run_id: str | None = None) -> None:
         self._config = config
         self._run_id = run_id or str(uuid.uuid4())
@@ -84,7 +73,7 @@ class Sandbox:
     def run_id(self) -> str:
         return self._run_id
 
-    def __enter__(self) -> "Sandbox":
+    def __enter__(self) -> Self:
         self._start()
         return self
 
@@ -97,10 +86,6 @@ class Sandbox:
         self._teardown()
 
     def _resolve_app_url(self) -> str:
-        """The URL the sandbox should use to reach the app, rewritten only
-        when app_host refers to the sandbox-runner's own machine -- left
-        alone for any other hostname (a real domain, a deployed URL)."""
-
         host = self._config.app_host
         if host in ("localhost", "127.0.0.1", "0.0.0.0"):
             host = self._HOST_GATEWAY_NAME
@@ -127,17 +112,6 @@ class Sandbox:
                     },
                 },
                 working_dir=self._config.app_path_container,
-                # Egress restriction (Sec10): a real bridge network (NOT
-                # network_mode="none", which has no route to anything,
-                # including the host) with exactly one extra DNS entry
-                # added. The container can resolve and reach
-                # host.docker.internal (or whatever app_host names) and
-                # whatever normal outbound resolution the bridge allows.
-                # This is a real isolation boundary, not the broken one
-                # from the previous version, but it is also not a
-                # fully-locked-down egress allowlist (that would need
-                # iptables rules or a proxy sidecar -- out of scope for a
-                # single-developer CLI tool per Sec10's own framing).
                 network_mode="bridge",
                 extra_hosts={self._HOST_GATEWAY_NAME: "host-gateway"},
                 environment={"APP_UNDER_TEST_URL": app_url},
@@ -163,8 +137,6 @@ class Sandbox:
 
         if self._container is None:
             raise SandboxError("sandbox not started")
-
-        import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
@@ -203,6 +175,4 @@ class Sandbox:
         # (screenshots, traces, reports) the caller needs after teardown.
         # Cleanup/retention is the caller's responsibility; see
         # architecture Sec17's retention-window policy, which this module
-        # does not implement (no implicit "sized for a single developer"
-        # assumption about disk usage should live silently inside the
-        # sandbox lifecycle itself).
+        # does not implement.

@@ -26,7 +26,7 @@ from play_agent.orchestrator.transitions import IllegalTransition, transition
 
 
 def make_state(**overrides) -> RunState:
-    defaults = dict(run_id="run-1", phase=Phase.COLLECTING_EVIDENCE)
+    defaults = {"run_id": "run-1", "phase": Phase.COLLECTING_EVIDENCE}
     defaults.update(overrides)
     return RunState(**defaults)
 
@@ -190,9 +190,6 @@ def test_exhausting_re_diagnosis_candidates_too_rejects():
 
 
 def test_full_happy_path_second_candidate_succeeds():
-    """Integration-style test within the pure function: walk a run through
-    evidence -> diagnosis -> candidate 1 fails -> candidate 2 succeeds,
-    asserting the state at every step."""
     state = make_state()
 
     state = transition(state, EvidenceCollected(evidence={"trace": "x"}))

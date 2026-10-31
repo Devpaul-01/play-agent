@@ -8,6 +8,7 @@ path (file-based SQLite) the real CLI will use.
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 
 import pytest
@@ -31,10 +32,10 @@ def store(tmp_path):
 
 
 def make_run(**overrides) -> Run:
-    defaults = dict(
-        id=str(uuid.uuid4()),
-        test_identifier="tests/checkout.spec.ts::completes checkout",
-    )
+    defaults = {
+        "id": str(uuid.uuid4()),
+        "test_identifier": "tests/checkout.spec.ts::completes checkout",
+    }
     defaults.update(overrides)
     return Run(**defaults)
 
@@ -48,7 +49,7 @@ def test_create_and_get_run(store: Store):
     assert fetched is not None
     assert fetched.id == run.id
     assert fetched.test_identifier == run.test_identifier
-    assert fetched.final_state is None  # still in progress
+    assert fetched.final_state is None
 
 
 def test_get_run_missing_returns_none(store: Store):
@@ -117,7 +118,7 @@ def test_create_attempt_and_list(store: Store):
     assert attempts[0].id == attempt_id
     assert attempts[0].candidate_rank == 1
     assert attempts[0].attempt_kind == AttemptKind.CANDIDATE
-    assert attempts[0].verification_outcome is None  # not verified yet
+    assert attempts[0].verification_outcome is None
 
 
 def test_update_attempt_verification(store: Store):
@@ -163,17 +164,12 @@ def test_attempts_ordered_by_insertion(store: Store):
 
 
 def test_attempt_fk_constraint_enforced(store: Store):
-    # Attempts must reference a real run -- this is what lets us trust the
-    # eval harness (Sec17) joining attempts back to runs without orphans.
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.IntegrityError):
         store.create_attempt(
             Attempt(run_id="nonexistent-run", candidate_rank=1, attempt_kind=AttemptKind.CANDIDATE)
         )
 
 
 def test_cascading_delete_not_relied_upon_but_fk_enabled(store: Store):
-    # Sanity check that PRAGMA foreign_keys actually took effect for this
-    # connection -- SQLite silently ignores FK violations if it's off,
-    # which would make the previous test a false negative.
     cursor = store._conn.execute("PRAGMA foreign_keys")
     assert cursor.fetchone()[0] == 1

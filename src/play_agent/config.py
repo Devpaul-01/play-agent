@@ -18,24 +18,16 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Config:
-    # Groq provider.
     groq_api_key: str
     groq_model: str
 
-    # The fixture app under test -- a *local checkout path*, not a bare git
-    # URL. The orchestrator never clones/fetches anything itself (that's a
-    # human/CI setup step); it only ever reads a path it's given. Keeping
-    # "clone the fixture repo" outside the agent's own capabilities is
-    # itself a small trust-boundary decision: the agent has no reason to
-    # need network access to arbitrary git remotes.
     app_under_test_path: str
     app_under_test_host: str
 
-    # SQLite store location.
     db_path: str
 
     @staticmethod
-    def from_env() -> "Config":
+    def from_env() -> Config:
         def require(name: str) -> str:
             value = os.environ.get(name)
             if not value:

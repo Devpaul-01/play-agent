@@ -18,11 +18,11 @@ itself, never the host). Caught by review, not by running it. Verify
 with the smoke test in test_container_integration.py before trusting
 this against a real app.
 """
-
 from __future__ import annotations
 
 import concurrent.futures
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,12 +120,47 @@ class Sandbox:
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges"],
                 labels={"play-agent-run-id": self._run_id},
+                # Keep the container alive after its default entrypoint would
+                # otherwise exit immediately (e.g. python:3.11-slim's default
+                # command just drops into a REPL that exits on EOF with no
+                # TTY) -- exec_run needs a long-lived process namespace to
+                # attach to.
+                tty=True,
+                stdin_open=True,
             )
         except ImageNotFound as e:
             raise SandboxError(f"sandbox image not found: {self._config.image}") from e
         except APIError as e:
             raise SandboxError(f"failed to start sandbox container: {e}") from e
 
+        self._wait_until_running()
+
+    def _wait_until_running(self, timeout_seconds: float = 10.0) -> None:
+        """Block until the container's namespaces are actually live, not
+        just created. detach=True from containers.run() only guarantees
+        the container has started, not that exec_run can attach to it yet
+        -- on a fast host, exec_run can race ahead of the container's own
+        init process and fail with a low-level 'setns'/namespace error.
+        This was caught by CI's real-Docker integration job, not locally
+        (no Docker available to the author) -- the mocked unit tests
+        couldn't catch it, since they don't model Docker's actual startup
+        timing at all.
+        """
+
+        assert self._container is not None  # _start() always sets this first
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            self._container.reload()
+            if self._container.status == "running":
+                return
+            time.sleep(0.1)
+
+        status = self._container.status
+        raise SandboxError(
+            f"container did not reach running state within {timeout_seconds}s "
+            f"(status: {status})"
+        )
     def exec_run(self, command: list[str]) -> tuple[int, str]:
         """Run a command inside the already-started container, with a hard
         timeout (Sec10) enforced via a background thread, since the Docker

@@ -20,6 +20,7 @@ from play_agent.orchestrator.driver import Driver
 from play_agent.orchestrator.states import Candidate, Phase
 from play_agent.store.models import FinalState, VerificationOutcome
 from play_agent.store.store import Store
+from play_agent.orchestrator.groq_diagnoser import DiagnosisResult, TokenUsage
 from play_agent.tools.contracts import FailureEvidence, PatchApplyResult, VerificationResult
 
 
@@ -65,6 +66,15 @@ class FakeDiagnoser:
     first_call_candidates: tuple[Candidate, ...]
     re_diagnosis_candidates: tuple[Candidate, ...]
     proposed_exprs: dict[str, str]
+    
+    def diagnose_with_usage(
+        self, evidence: FailureEvidence, test_source: str, is_re_diagnosis: bool
+    ) -> DiagnosisResult:
+        candidates = self.re_diagnosis_candidates if is_re_diagnosis else self.first_call_candidates
+        return DiagnosisResult(
+            candidates=candidates,
+            usage=TokenUsage(prompt_tokens=0, completion_tokens=0, estimated_cost_usd=0.0),
+        )
 
     def diagnose(
         self, evidence: FailureEvidence, test_source: str, is_re_diagnosis: bool

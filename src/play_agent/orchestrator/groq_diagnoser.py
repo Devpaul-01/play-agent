@@ -1,15 +1,15 @@
-# src/play_agent/orchestrator/groq_diagnoser.py
 """Real Groq-backed Diagnoser (architecture Sec12), implementing the
 Diagnoser Protocol from driver.py.
 
 Uses Groq's tool-calling interface, not freeform JSON-mode prompting, to
-get structurally parseable responses: diagnose() and propose_repair()
-each force the model to call a single defined tool whose arguments are the
-actual structured output, rather than asking it to emit JSON as prose and
-hoping it's well-formed. The orchestrator still independently validates
-everything that comes back (Sec12: "provider-reported success is never
-treated as proof of correctness") -- tool-calling narrows the space of
-malformed responses, it doesn't eliminate the need to check them.
+get structurally parseable responses: diagnose_with_usage() and
+propose_repair() each force the model to call a single defined tool whose
+arguments are the actual structured output, rather than asking it to emit
+JSON as prose and hoping it's well-formed. The orchestrator still
+independently validates everything that comes back (Sec12:
+"provider-reported success is never treated as proof of correctness") --
+tool-calling narrows the space of malformed responses, it doesn't
+eliminate the need to check them.
 
 This module owns API calls and prompt construction only. It does not
 decide retry policy (that's transitions.py) or know about the sandbox --
@@ -28,11 +28,6 @@ from groq.types.chat import ChatCompletionToolParam
 from play_agent.orchestrator.states import Candidate
 from play_agent.tools.contracts import FailureEvidence
 
-# Groq's published per-token pricing for the model in use, used only to
-# populate Attempt.estimated_cost_usd (store schema Sec13) -- an estimate
-# for observability, not a billing-accurate figure. Update if the model
-# or Groq's pricing changes; this is intentionally a single, visible
-# constant rather than buried in a cost-calculation helper.
 _PRICING_USD_PER_MILLION_TOKENS = {
     "prompt": 0.59,
     "completion": 0.79,
@@ -56,10 +51,8 @@ class TokenUsage:
 @dataclass(frozen=True)
 class DiagnosisResult:
     """Wraps the Candidate tuple with usage data, so the Driver can
-    persist cost/token figures onto the Attempt row (Sec13's previously
-    unused token_usage_prompt/token_usage_completion/estimated_cost_usd
-    columns) without the Diagnoser Protocol itself needing to change
-    shape for every caller that doesn't care about cost."""
+    persist cost/token figures onto the Attempt row (Sec13's
+    token_usage_prompt/token_usage_completion/estimated_cost_usd columns)."""
 
     candidates: tuple[Candidate, ...]
     usage: TokenUsage
@@ -153,20 +146,9 @@ class GroqDiagnoser:
 
     def __init__(self, api_key: str, model: str, client: Groq | None = None) -> None:
         self._model = model
-        # client is injectable for tests (a fake transport); production
-        # callers just pass api_key and get a real Groq() client.
         self._client = client or Groq(api_key=api_key)
 
-    def diagnose(
-        self,
-        evidence: FailureEvidence,
-        test_source: str,
-        is_re_diagnosis: bool,
-    ) -> tuple[Candidate, ...]:
-        result = self._diagnose_with_usage(evidence, test_source, is_re_diagnosis)
-        return result.candidates
-
-    def _diagnose_with_usage(
+    def diagnose_with_usage(
         self,
         evidence: FailureEvidence,
         test_source: str,
@@ -197,6 +179,18 @@ class GroqDiagnoser:
             for i, c in enumerate(raw_candidates)
         )
         return DiagnosisResult(candidates=candidates, usage=usage)
+
+    def diagnose(
+        self,
+        evidence: FailureEvidence,
+        test_source: str,
+        is_re_diagnosis: bool,
+    ) -> tuple[Candidate, ...]:
+        """Convenience wrapper for callers that only want candidates (e.g.
+        the smoke-test script) -- the Driver uses diagnose_with_usage
+        directly so it can persist cost/token data."""
+
+        return self.diagnose_with_usage(evidence, test_source, is_re_diagnosis).candidates
 
     def propose_repair(self, evidence: FailureEvidence, candidate: Candidate) -> str:
         prompt = _build_repair_prompt(evidence, candidate)

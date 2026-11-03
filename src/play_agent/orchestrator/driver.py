@@ -1,4 +1,3 @@
-# src/play_agent/orchestrator/driver.py
 """The Driver: the actual run loop (architecture Sec6/Sec14).
 
 Owns all I/O. Calls tools and the diagnoser, turns their results into
@@ -9,18 +8,17 @@ run reaches a terminal phase.
 This is deliberately the ONLY place I/O and the pure state machine meet --
 transitions.py stays pure and tested with zero mocking; this file is where
 real tool calls, real LLM calls, and real persistence happen, and it's
-tested with fakes standing in for those, not real ones, so these tests
-run fast and don't depend on a live LLM or sandbox being available.
+tested with fakes standing in for those, not real ones.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
-from pathlib import Path
-
+from play_agent.orchestrator.groq_diagnoser import DiagnosisResult, TokenUsage
 from play_agent.orchestrator.states import (
     Candidate,
     DiagnosisCompleted,
@@ -44,19 +42,22 @@ from play_agent.store.models import (
 from play_agent.store.store import Store
 from play_agent.tools.contracts import FailureEvidence, PatchApplyResult, VerificationResult
 
+
 class Diagnoser(Protocol):
     """The LLM-backed piece (Sec12): diagnosis and repair proposal."""
 
-    def diagnose(
+    def diagnose_with_usage(
         self, evidence: FailureEvidence, test_source: str, is_re_diagnosis: bool
-    ) -> tuple[Candidate, ...]:
-        """Return ranked candidates, or an empty tuple if not repairable.
-        is_re_diagnosis is True exactly once per run, on the single
-        evidence-augmented re-diagnosis pass allowed by Sec6."""
+    ) -> DiagnosisResult:
+        """Return ranked candidates plus token/cost usage. is_re_diagnosis
+        is True exactly once per run, on the single evidence-augmented
+        re-diagnosis pass allowed by Sec6."""
         ...
 
     def propose_repair(self, evidence: FailureEvidence, candidate: Candidate) -> str:
+        """Return the new locator expression for this candidate."""
         ...
+
 
 class ToolBelt(Protocol):
     """The four tools from Sec7, bundled as one dependency the Driver calls
@@ -92,6 +93,12 @@ class Driver:
         self._store = store
         self._tools = tools
         self._diagnoser = diagnoser
+        # Bridges diagnosis-time usage data to the attempt row created
+        # several phases later (VERIFYING) -- RunState stays immutable and
+        # doesn't carry this, since it's a billing/observability concern,
+        # not state-machine-relevant. Not elegant, but honest about the gap
+        # it's closing rather than leaving token_usage_* columns NULL.
+        self._pending_usage: TokenUsage | None = None
 
     def run(self, test_file_path: str, test_title: str) -> DriverResult:
         run_id = str(uuid.uuid4())
@@ -116,17 +123,9 @@ class Driver:
     def _step(
         self, state: RunState, test_file_path: str, test_title: str, attempts_made: int
     ) -> tuple[RunState, int]:
-        """Perform the I/O appropriate to the current phase, turn the
-        result into an Event, and advance the pure state machine by
-        exactly one transition. One _step call = one real-world action."""
-
         match state.phase:
             case Phase.COLLECTING_EVIDENCE:
                 evidence = self._tools.collect_failure_evidence(test_file_path, test_title)
-                # Evidence is kept as a dict on RunState (per states.py's
-                # existing shape) -- stash the FailureEvidence's fields so
-                # later phases (diagnosis) can reconstruct what they need
-                # without the Driver having to pass it around separately.
                 event = EvidenceCollected(evidence=evidence.__dict__)
                 return transition(state, event), attempts_made
 
@@ -134,27 +133,22 @@ class Driver:
                 evidence = FailureEvidence(**state.evidence)
                 test_source = Path(evidence.test_file_path).read_text()
                 is_re_diagnosis = state.re_diagnosis_count > 0
-                candidates = self._diagnoser.diagnose(
+                diagnosis = self._diagnoser.diagnose_with_usage(
                     evidence, test_source, is_re_diagnosis=is_re_diagnosis
                 )
-                event = DiagnosisCompleted(candidates=candidates)
+                self._pending_usage = diagnosis.usage
+                event = DiagnosisCompleted(candidates=diagnosis.candidates)
                 return transition(state, event), attempts_made
+
             case Phase.PROPOSING_REPAIR:
                 evidence = FailureEvidence(**state.evidence)
                 candidate = state.current_candidate
-                assert candidate is not None  # PROPOSING_REPAIR implies a current candidate
+                assert candidate is not None
                 new_expr = self._diagnoser.propose_repair(evidence, candidate)
                 event = RepairProposed(new_locator_expr=new_expr)
                 return transition(state, event), attempts_made
 
             case Phase.VALIDATING_PROPOSAL:
-                # Validation is folded into apply_patch's own call in the
-                # current tool contract (it validates before writing) --
-                # the Driver asks apply_patch to validate-only here by
-                # checking the result without it having taken effect yet.
-                # NOTE: this is a seam that will tighten once apply_patch's
-                # real sandbox-backed body exists (M1 remaining tool
-                # bodies) -- tracked, not hidden.
                 candidate = state.current_candidate
                 assert candidate is not None
                 result = self._tools.apply_patch(
@@ -164,12 +158,6 @@ class Driver:
                 return transition(state, event), attempts_made
 
             case Phase.APPLYING_PATCH:
-                # The patch was already applied as part of validation above
-                # in this tool contract's current shape -- this phase just
-                # confirms it landed. Treated as always succeeding here
-                # because VALIDATING_PROPOSAL already gated on it; a
-                # genuinely separate apply step is a refinement for when
-                # apply_patch's real body exists.
                 event = PatchApplied(applied=True)
                 attempts_made += 1
                 return transition(state, event), attempts_made
@@ -203,6 +191,7 @@ class Driver:
     def _persist_attempt(self, state: RunState, result: VerificationResult) -> None:
         candidate = state.current_candidate
         assert candidate is not None
+        usage = self._pending_usage
         attempt_id = self._store.create_attempt(
             Attempt(
                 run_id=state.run_id,
@@ -211,11 +200,14 @@ class Driver:
                 diagnosis_reasoning=candidate.reasoning,
                 patch_locator_call_id=candidate.locator_call_id,
                 patch_new_locator_expr=candidate.new_locator_expr,
+                token_usage_prompt=usage.prompt_tokens if usage else None,
+                token_usage_completion=usage.completion_tokens if usage else None,
+                estimated_cost_usd=usage.estimated_cost_usd if usage else None,
             )
         )
         self._store.update_attempt_verification(
             attempt_id,
             verification_outcome=VerificationOutcome(result.outcome),
             verification_reps=result.reps_run,
-            state_duration_ms=0,  # real timing wired once tools are real
+            state_duration_ms=0,
         )

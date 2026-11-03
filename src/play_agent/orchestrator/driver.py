@@ -19,6 +19,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
+from pathlib import Path
+
 from play_agent.orchestrator.states import (
     Candidate,
     DiagnosisCompleted,
@@ -46,7 +48,7 @@ class Diagnoser(Protocol):
     """The LLM-backed piece (Sec12): diagnosis and repair proposal."""
 
     def diagnose(
-        self, evidence: FailureEvidence, is_re_diagnosis: bool
+        self, evidence: FailureEvidence, test_source: str, is_re_diagnosis: bool
     ) -> tuple[Candidate, ...]:
         """Return ranked candidates, or an empty tuple if not repairable.
         is_re_diagnosis is True exactly once per run, on the single
@@ -130,18 +132,13 @@ class Driver:
 
             case Phase.DIAGNOSING:
                 evidence = FailureEvidence(**state.evidence)
-                # state.candidates is already cleared to () by the time we
-                # reach a re-diagnosis pass (transitions.py's
-                # _advance_after_candidate_failure clears it before moving
-                # back to DIAGNOSING) -- re_diagnosis_count, not candidates,
-                # is the correct signal for "is this a retry."
+                test_source = Path(evidence.test_file_path).read_text()
                 is_re_diagnosis = state.re_diagnosis_count > 0
                 candidates = self._diagnoser.diagnose(
-                    evidence, is_re_diagnosis=is_re_diagnosis
+                    evidence, test_source, is_re_diagnosis=is_re_diagnosis
                 )
                 event = DiagnosisCompleted(candidates=candidates)
                 return transition(state, event), attempts_made
-
             case Phase.PROPOSING_REPAIR:
                 evidence = FailureEvidence(**state.evidence)
                 candidate = state.current_candidate

@@ -222,7 +222,7 @@ def test_diagnose_with_usage_populates_token_counts():
     client = FakeGroqClient(responses=[response])
     diagnoser = GroqDiagnoser(api_key="unused", model="test-model", client=client)
 
-    result = diagnoser._diagnose_with_usage(make_evidence(), test_source="...", is_re_diagnosis=False)
+    result = diagnoser.diagnose_with_usage(make_evidence(), test_source="...", is_re_diagnosis=False)
 
     assert result.usage.prompt_tokens == 250
     assert result.usage.completion_tokens == 40
@@ -245,7 +245,7 @@ def test_diagnose_with_usage_handles_missing_usage_gracefully():
     client = FakeGroqClient(responses=[response])
     diagnoser = GroqDiagnoser(api_key="unused", model="test-model", client=client)
 
-    result = diagnoser._diagnose_with_usage(make_evidence(), test_source="...", is_re_diagnosis=False)
+    result = diagnoser.diagnose_with_usage(make_evidence(), test_source="...", is_re_diagnosis=False)
 
     assert result.usage.prompt_tokens == 0
     assert result.usage.estimated_cost_usd == 0.0

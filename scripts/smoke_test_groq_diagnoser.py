@@ -10,14 +10,19 @@ matches what the unit tests' fakes assume.
 Usage:
     PLAY_AGENT_GROQ_API_KEY=... uv run python scripts/smoke_test_groq_diagnoser.py
 """
-
 from __future__ import annotations
+
+from dotenv import load_dotenv
+load_dotenv()  # reads .env from the current directory (or a parent)
+
 
 import os
 import sys
 
 from play_agent.orchestrator.groq_diagnoser import GroqDiagnoser
 from play_agent.tools.contracts import FailureEvidence
+
+
 
 SAMPLE_TEST_SOURCE = """
 import { test, expect } from '@playwright/test';
@@ -36,7 +41,7 @@ def main() -> int:
         print("Set PLAY_AGENT_GROQ_API_KEY and re-run.", file=sys.stderr)
         return 1
 
-    model = os.environ.get("PLAY_AGENT_GROQ_MODEL", "llama-3.3-70b-versatile")
+    model = os.environ.get("PLAY_AGENT_GROQ_MODEL", "openai/gpt-oss-120b")
     diagnoser = GroqDiagnoser(api_key=api_key, model=model)
 
     evidence = FailureEvidence(

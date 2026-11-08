@@ -244,14 +244,9 @@ def test_collect_failure_evidence_picks_last_failing_result_across_retries(
     assert evidence.error_message == "second attempt"
 
 
-def test_probe_live_dom_stub_raises_not_implemented():
-    with pytest.raises(NotImplementedError):
-        probe_live_dom("http://localhost:5173", 'getByTestId("x")', replay_actions=[])
-
-
 class FakeSandbox:
     """Scripted exec_run responses, one per call, so tests control each
-    rep's outcome independently without touching Docker."""
+    call's outcome independently without touching Docker."""
 
     def __init__(self, responses: list[tuple[int, str]]) -> None:
         self._responses = list(responses)
@@ -260,6 +255,96 @@ class FakeSandbox:
     def exec_run(self, command: list[str]) -> tuple[int, str]:
         self.commands.append(command)
         return self._responses.pop(0)
+
+
+def test_probe_live_dom_without_sandbox_raises_tool_error():
+    with pytest.raises(ToolError, match="requires a sandbox"):
+        probe_live_dom("http://localhost:5173", 'getByTestId("x")', replay_actions=[])
+
+
+def test_probe_live_dom_passes_app_url_selector_and_actions_to_script():
+    sandbox = FakeSandbox([(0, '{"resolved": true, "matchedCount": 1, "isVisible": true}')])
+    actions = [{"type": "goto", "url": "/cart"}]
+
+    probe_live_dom(
+        "http://localhost:5173", 'page.getByTestId("x")', replay_actions=actions, sandbox=sandbox
+    )
+
+    command = sandbox.commands[0]
+    assert command[0] == "node"
+    assert command[1] == "/app/scripts/probe_dom.js"
+    probe_input = json.loads(command[2])
+    assert probe_input["appUrl"] == "http://localhost:5173"
+    assert probe_input["candidateSelector"] == 'page.getByTestId("x")'
+    assert probe_input["replayActions"] == actions
+
+
+def test_probe_live_dom_resolved_unique_visible():
+    sandbox = FakeSandbox([(0, '{"resolved": true, "matchedCount": 1, "isVisible": true}')])
+
+    result = probe_live_dom(
+        "http://localhost:5173", 'page.getByTestId("x")', replay_actions=[], sandbox=sandbox
+    )
+
+    assert result.resolved is True
+    assert result.matched_count == 1
+    assert result.is_visible is True
+    assert result.is_unique is True
+
+
+def test_probe_live_dom_multiple_matches_not_unique():
+    sandbox = FakeSandbox([(0, '{"resolved": true, "matchedCount": 3, "isVisible": true}')])
+
+    result = probe_live_dom(
+        "http://localhost:5173", 'page.getByText("Submit")', replay_actions=[], sandbox=sandbox
+    )
+
+    assert result.resolved is True
+    assert result.matched_count == 3
+    assert result.is_unique is False
+
+
+def test_probe_live_dom_not_resolved():
+    sandbox = FakeSandbox([(0, '{"resolved": false, "matchedCount": 0, "isVisible": false}')])
+
+    result = probe_live_dom(
+        "http://localhost:5173", 'page.getByTestId("gone")', replay_actions=[], sandbox=sandbox
+    )
+
+    assert result.resolved is False
+    assert result.matched_count == 0
+    assert result.is_unique is False
+
+
+def test_probe_live_dom_script_failure_raises_tool_error():
+    sandbox = FakeSandbox([(1, "Error: net::ERR_CONNECTION_REFUSED")])
+
+    with pytest.raises(ToolError, match="script failed"):
+        probe_live_dom(
+            "http://localhost:5173", 'page.getByTestId("x")', replay_actions=[], sandbox=sandbox
+        )
+
+
+def test_probe_live_dom_ignores_noise_before_final_json_line():
+    # The script may emit stderr/stdout noise ahead of its result; only
+    # the last non-blank line is trusted as the JSON result.
+    noisy_output = "some browser warning\n\n{\"resolved\": true, \"matchedCount\": 1, \"isVisible\": true}"
+    sandbox = FakeSandbox([(0, noisy_output)])
+
+    result = probe_live_dom(
+        "http://localhost:5173", 'page.getByTestId("x")', replay_actions=[], sandbox=sandbox
+    )
+
+    assert result.resolved is True
+
+
+def test_probe_live_dom_unparseable_output_raises_tool_error():
+    sandbox = FakeSandbox([(0, "not json at all")])
+
+    with pytest.raises(ToolError, match="unparseable"):
+        probe_live_dom(
+            "http://localhost:5173", 'page.getByTestId("x")', replay_actions=[], sandbox=sandbox
+        )
 
 
 def test_run_verification_without_sandbox_raises_tool_error(sample_test_file):

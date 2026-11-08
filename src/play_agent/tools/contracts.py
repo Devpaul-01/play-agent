@@ -166,17 +166,72 @@ def _find_attachment_path(attachments: list[dict], name_prefix: str) -> str | No
     return None
 
 
-def probe_live_dom(app_url: str, candidate_selector: str, replay_actions: list[dict]) -> DomProbeResult:
-    """Replay recorded actions up to the failure point in a live browser,
-    then check whether `candidate_selector` resolves to a unique, visible
-    element.
+def probe_live_dom(
+    app_url: str,
+    candidate_selector: str,
+    replay_actions: list[dict],
+    sandbox: SandboxExecutor | None = None,
+) -> DomProbeResult:
+    """Relaunch an isolated browser context inside the sandbox, replay
+    recorded actions up to the failure point, then check whether
+    `candidate_selector` resolves to a unique, visible element (Sec7).
 
     Requires the app-under-test's state to be disposable per run (Sec2) --
-    see the fixture app spec's statelessness rule. Not yet implemented;
-    depends on a real browser context, which needs the sandbox.
+    see the fixture app spec's statelessness rule; this function has no
+    way to enforce that itself, it only documents the assumption its
+    caller must satisfy.
+
+    sandbox is injected exactly as in run_verification, for the same
+    reason: testable without Docker, execution-environment details stay
+    the caller's concern. The actual browser automation runs as a small
+    Node/Playwright script executed via sandbox.exec_run (Sec10's
+    network-restricted container), not in this process -- this process
+    never gets a direct browser handle, matching Sec7's "only orchestrator-
+    mediated tool access" boundary. The script is handed its input as a
+    single JSON argument and must print exactly one JSON object to
+    stdout; this keeps the probe's internals swappable (e.g. a different
+    script path, a different browser) without changing this function's
+    signature.
     """
 
-    raise NotImplementedError("requires a live browser context -- wired in the sandbox step")
+    if sandbox is None:
+        raise ToolError("probe_live_dom requires a sandbox (Sec10); none was provided")
+
+    probe_input = {
+        "appUrl": app_url,
+        "candidateSelector": candidate_selector,
+        "replayActions": replay_actions,
+    }
+
+    exit_code, output = sandbox.exec_run(
+        ["node", "/app/scripts/probe_dom.js", json.dumps(probe_input)]
+    )
+
+    if exit_code != 0:
+        raise ToolError(f"probe_live_dom script failed (exit {exit_code}): {output}")
+
+    try:
+        probe_output = json.loads(_last_json_line(output))
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ToolError(f"probe_live_dom script produced unparseable output: {output}") from e
+
+    return DomProbeResult(
+        candidate_selector=candidate_selector,
+        resolved=probe_output["resolved"],
+        matched_count=probe_output["matchedCount"],
+        is_visible=probe_output["isVisible"],
+        is_unique=probe_output["matchedCount"] == 1,
+    )
+
+
+def _last_json_line(output: str) -> str:
+    # The probe script may emit incidental browser/console noise before
+    # its single result line; the result is always the last non-blank
+    # line, by the script's own contract (see probe_dom.js).
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("no output produced")
+    return lines[-1]
 
 
 def apply_patch(

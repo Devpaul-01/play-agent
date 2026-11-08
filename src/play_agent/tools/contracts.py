@@ -13,6 +13,15 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
+
+
+class SandboxExecutor(Protocol):
+    """What run_verification needs from a sandbox -- deliberately just
+    this one method, so tests can supply a fake without depending on
+    play_agent.sandbox.container (and transitively, Docker)."""
+
+    def exec_run(self, command: list[str]) -> tuple[int, str]: ...
 
 
 @dataclass(frozen=True)
@@ -220,12 +229,54 @@ def _unified_diff(before: str, after: str, filename: str) -> str:
     return "".join(lines)
 
 
-def run_verification(test_file_path: str, test_title: str, reps: int = 3) -> VerificationResult:
+def run_verification(
+    test_file_path: str,
+    test_title: str,
+    reps: int = 3,
+    sandbox: SandboxExecutor | None = None,
+) -> VerificationResult:
     """Re-run the (now-patched) test `reps` times in the sandbox and report
     pass/fail/flaky. Repeated runs exist specifically so a flaky result is
     never mistaken for a confirmed fix (Sec7).
 
-    Not yet implemented; requires the sandbox's process execution.
+    sandbox is any object exposing exec_run(command) -> (exit_code, output)
+    -- in practice play_agent.sandbox.container.Sandbox, injected rather
+    than constructed here so this function stays testable without Docker
+    and agnostic about how the sandbox is configured (that's the caller's
+    concern, per Sec10). A sandbox is required; this tool has no
+    unsandboxed fallback, since running arbitrary patched test code
+    outside the sandbox is exactly what Sec10 exists to prevent.
     """
 
-    raise NotImplementedError("requires sandboxed test execution -- wired in the sandbox step")
+    if sandbox is None:
+        raise ToolError("run_verification requires a sandbox (Sec10); none was provided")
+
+    outcomes: list[str] = []
+    logs_parts: list[str] = []
+
+    for rep in range(reps):
+        exit_code, output = sandbox.exec_run(
+            ["npx", "playwright", "test", test_file_path, "--grep", _escape_grep(test_title)]
+        )
+        logs_parts.append(f"--- rep {rep + 1}/{reps} (exit {exit_code}) ---\n{output}")
+        outcomes.append("pass" if exit_code == 0 else "fail")
+
+    logs = "\n".join(logs_parts)
+
+    if all(o == "pass" for o in outcomes):
+        outcome = "pass"
+    elif all(o == "fail" for o in outcomes):
+        outcome = "fail"
+    else:
+        outcome = "flaky"
+
+    return VerificationResult(outcome=outcome, reps_run=reps, logs=logs)
+
+
+def _escape_grep(test_title: str) -> str:
+    # Playwright's --grep takes a regex; escape literal regex metacharacters
+    # in the test title so titles containing them (e.g. "handles $100 total")
+    # are matched literally rather than as a pattern.
+    import re
+
+    return re.escape(test_title)

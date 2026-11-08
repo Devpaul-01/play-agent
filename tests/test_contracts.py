@@ -249,6 +249,72 @@ def test_probe_live_dom_stub_raises_not_implemented():
         probe_live_dom("http://localhost:5173", 'getByTestId("x")', replay_actions=[])
 
 
-def test_run_verification_stub_raises_not_implemented(sample_test_file):
-    with pytest.raises(NotImplementedError):
+class FakeSandbox:
+    """Scripted exec_run responses, one per call, so tests control each
+    rep's outcome independently without touching Docker."""
+
+    def __init__(self, responses: list[tuple[int, str]]) -> None:
+        self._responses = list(responses)
+        self.commands: list[list[str]] = []
+
+    def exec_run(self, command: list[str]) -> tuple[int, str]:
+        self.commands.append(command)
+        return self._responses.pop(0)
+
+
+def test_run_verification_without_sandbox_raises_tool_error(sample_test_file):
+    with pytest.raises(ToolError, match="requires a sandbox"):
         run_verification(str(sample_test_file), "completes checkout")
+
+
+def test_run_verification_all_passing_reps_returns_pass(sample_test_file):
+    sandbox = FakeSandbox([(0, "1 passed"), (0, "1 passed"), (0, "1 passed")])
+
+    result = run_verification(str(sample_test_file), "completes checkout", sandbox=sandbox)
+
+    assert result.outcome == "pass"
+    assert result.reps_run == 3
+    assert len(sandbox.commands) == 3
+
+
+def test_run_verification_all_failing_reps_returns_fail(sample_test_file):
+    sandbox = FakeSandbox([(1, "1 failed"), (1, "1 failed"), (1, "1 failed")])
+
+    result = run_verification(str(sample_test_file), "completes checkout", sandbox=sandbox)
+
+    assert result.outcome == "fail"
+
+
+def test_run_verification_mixed_reps_returns_flaky(sample_test_file):
+    sandbox = FakeSandbox([(0, "1 passed"), (1, "1 failed"), (0, "1 passed")])
+
+    result = run_verification(str(sample_test_file), "completes checkout", sandbox=sandbox)
+
+    assert result.outcome == "flaky"
+
+
+def test_run_verification_respects_reps_argument(sample_test_file):
+    sandbox = FakeSandbox([(0, "ok")])
+
+    result = run_verification(str(sample_test_file), "completes checkout", reps=1, sandbox=sandbox)
+
+    assert result.reps_run == 1
+    assert len(sandbox.commands) == 1
+
+
+def test_run_verification_logs_include_each_rep(sample_test_file):
+    sandbox = FakeSandbox([(0, "first rep output"), (1, "second rep output")])
+
+    result = run_verification(str(sample_test_file), "completes checkout", reps=2, sandbox=sandbox)
+
+    assert "first rep output" in result.logs
+    assert "second rep output" in result.logs
+
+
+def test_run_verification_escapes_regex_metacharacters_in_title(sample_test_file):
+    sandbox = FakeSandbox([(0, "ok")])
+
+    run_verification(str(sample_test_file), "handles $100 total", reps=1, sandbox=sandbox)
+
+    grep_arg = sandbox.commands[0][sandbox.commands[0].index("--grep") + 1]
+    assert grep_arg == "handles\\ \\$100\\ total"

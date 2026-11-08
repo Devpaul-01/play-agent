@@ -10,6 +10,8 @@ do nothing, so a future caller can't mistake "not wired yet" for success.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from play_agent.tools.contracts import (
@@ -117,9 +119,129 @@ def test_collect_failure_evidence_missing_file_raises_tool_error():
         collect_failure_evidence("/nonexistent/path.spec.ts", "some test")
 
 
-def test_collect_failure_evidence_stub_raises_not_implemented(sample_test_file):
-    with pytest.raises(NotImplementedError):
+def test_collect_failure_evidence_missing_report_raises_tool_error(sample_test_file):
+    with pytest.raises(ToolError, match="no Playwright report found"):
         collect_failure_evidence(str(sample_test_file), "completes checkout")
+
+
+def test_collect_failure_evidence_missing_test_in_report_raises_tool_error(
+    sample_test_file, tmp_path
+):
+    report = tmp_path / "results.json"
+    report.write_text(json.dumps({"suites": []}))
+
+    with pytest.raises(ToolError, match="no result for test"):
+        collect_failure_evidence(
+            str(sample_test_file), "completes checkout", report_path=str(report)
+        )
+
+
+def test_collect_failure_evidence_malformed_report_raises_tool_error(sample_test_file, tmp_path):
+    report = tmp_path / "results.json"
+    report.write_text("{not valid json")
+
+    with pytest.raises(ToolError, match="not valid JSON"):
+        collect_failure_evidence(
+            str(sample_test_file), "completes checkout", report_path=str(report)
+        )
+
+
+def test_collect_failure_evidence_parses_real_playwright_report_shape(sample_test_file, tmp_path):
+    # Shape matches Playwright's documented --reporter=json output:
+    # suites[].specs[].tests[].results[], with error.message/.stack and
+    # attachments[] carrying screenshot/trace paths.
+    report = tmp_path / "results.json"
+    report.write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "file": "checkout.spec.ts",
+                        "specs": [
+                            {
+                                "title": "completes checkout",
+                                "tests": [
+                                    {
+                                        "results": [
+                                            {
+                                                "status": "failed",
+                                                "error": {
+                                                    "message": "locator resolved to 0 elements",
+                                                    "stack": "Error: ...\n  at checkout.spec.ts:5:10",
+                                                },
+                                                "attachments": [
+                                                    {
+                                                        "name": "screenshot",
+                                                        "path": "/out/screenshot.png",
+                                                    },
+                                                    {"name": "trace", "path": "/out/trace.zip"},
+                                                ],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+
+    evidence = collect_failure_evidence(
+        str(sample_test_file), "completes checkout", report_path=str(report)
+    )
+
+    assert evidence.error_message == "locator resolved to 0 elements"
+    assert "checkout.spec.ts:5:10" in evidence.stack_trace
+    assert evidence.screenshot_path == "/out/screenshot.png"
+    assert evidence.trace_path == "/out/trace.zip"
+
+
+def test_collect_failure_evidence_picks_last_failing_result_across_retries(
+    sample_test_file, tmp_path
+):
+    # Playwright appends one results[] entry per retry attempt; the most
+    # recent failing attempt is the one worth diagnosing, not the first.
+    report = tmp_path / "results.json"
+    report.write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "file": "checkout.spec.ts",
+                        "specs": [
+                            {
+                                "title": "completes checkout",
+                                "tests": [
+                                    {
+                                        "results": [
+                                            {
+                                                "status": "failed",
+                                                "error": {"message": "first attempt", "stack": ""},
+                                                "attachments": [],
+                                            },
+                                            {
+                                                "status": "failed",
+                                                "error": {"message": "second attempt", "stack": ""},
+                                                "attachments": [],
+                                            },
+                                        ]
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+
+    evidence = collect_failure_evidence(
+        str(sample_test_file), "completes checkout", report_path=str(report)
+    )
+
+    assert evidence.error_message == "second attempt"
 
 
 def test_probe_live_dom_stub_raises_not_implemented():

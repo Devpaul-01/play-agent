@@ -70,17 +70,43 @@ def test_apply_patch_invalid_replacement_rejected_before_file_write(sample_test_
     assert result.diff is None
 
 
-def test_apply_patch_valid_patch_reaches_the_unimplemented_write(sample_test_file):
-    # A genuinely valid patch SHOULD pass validation and then hit the
-    # not-yet-wired file write. We assert it gets that far (raises
-    # NotImplementedError, not silently returns or raises something else)
-    # -- this is the seam the sandbox step needs to fill in.
+def test_apply_patch_valid_patch_writes_file_and_returns_diff(sample_test_file):
     from play_agent.tools.patch_validation import find_locator_calls
 
     target = find_locator_calls(SAMPLE_TEST_FILE)[0]
 
-    with pytest.raises(NotImplementedError):
-        apply_patch(str(sample_test_file), target.locator_call_id, 'page.getByRole("button")')
+    result = apply_patch(str(sample_test_file), target.locator_call_id, 'page.getByRole("button")')
+
+    assert result.applied is True
+    assert result.reason is None
+    assert result.diff is not None
+    assert "getByRole" in result.diff
+
+    written = sample_test_file.read_text()
+    assert 'page.getByRole("button")' in written
+    assert target.source_text not in written
+
+
+def test_apply_patch_only_touches_the_targeted_call(sample_test_file):
+    # The patch must replace exactly the span of the targeted locator
+    # call and leave the rest of the file -- including other locator
+    # calls -- untouched.
+    multi_call_source = SAMPLE_TEST_FILE + (
+        "\ntest('second', async ({ page }) => {\n"
+        "  await page.getByText('also here').click();\n"
+        "});\n"
+    )
+    sample_test_file.write_text(multi_call_source)
+
+    from play_agent.tools.patch_validation import find_locator_calls
+
+    target = find_locator_calls(multi_call_source)[0]
+    result = apply_patch(str(sample_test_file), target.locator_call_id, 'page.getByTestId("new-id")')
+
+    assert result.applied is True
+    written = sample_test_file.read_text()
+    assert 'page.getByTestId("new-id")' in written
+    assert "getByText('also here')" in written  # untouched
 
 
 # -- stubs: confirm they fail loudly, not silently ---------------------------

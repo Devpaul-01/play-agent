@@ -93,12 +93,16 @@ def apply_patch(
     test_file_path: str, locator_call_id: str, new_locator_expression: str
 ) -> PatchApplyResult:
     """Validate (via patch_validation) and, if valid, write the patch to
-    the test file. This is the one tool whose validation logic is fully
-    implemented already (patch_validation.py) -- only the file I/O here is
-    still a stub pending the sandbox's mount setup.
+    the test file, returning a unified diff of the change for human
+    review (Sec14).
+
+    The write targets whatever path the sandbox has mounted at
+    test_file_path -- this function does not know or care whether that
+    path is inside a container or on the host; Sec10's mount setup is
+    what makes "the test file path" mean the sandboxed copy at run time.
     """
 
-    from play_agent.tools.patch_validation import validate_patch
+    from play_agent.tools.patch_validation import resolve_locator_call, validate_patch
 
     path = Path(test_file_path)
     if not path.exists():
@@ -110,10 +114,29 @@ def apply_patch(
     if not result.valid:
         return PatchApplyResult(applied=False, reason=result.reason, diff=None)
 
-    # Actual file write + diff generation wired in the sandbox step, once
-    # writes happen inside the mounted sandbox path rather than directly
-    # on the host filesystem.
-    raise NotImplementedError("file write wired in the sandbox step")
+    # validate_patch already confirmed this resolves; re-resolving here
+    # (rather than threading the span through ValidationResult) keeps
+    # patch_validation's return type free of apply_patch-specific detail.
+    target = resolve_locator_call(source, locator_call_id)
+    assert target is not None  # guaranteed by validate_patch succeeding above
+
+    patched_source = source[: target.start_byte] + new_locator_expression + source[target.end_byte :]
+    path.write_text(patched_source)
+
+    diff = _unified_diff(source, patched_source, path.name)
+    return PatchApplyResult(applied=True, reason=None, diff=diff)
+
+
+def _unified_diff(before: str, after: str, filename: str) -> str:
+    import difflib
+
+    lines = difflib.unified_diff(
+        before.splitlines(keepends=True),
+        after.splitlines(keepends=True),
+        fromfile=filename,
+        tofile=filename,
+    )
+    return "".join(lines)
 
 
 def run_verification(test_file_path: str, test_title: str, reps: int = 3) -> VerificationResult:

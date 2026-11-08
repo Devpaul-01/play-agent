@@ -32,9 +32,23 @@ def config(tmp_path):
     )
 
 
+def _running_container() -> MagicMock:
+    """A mock container whose .status already reads 'running', so
+    Sandbox._wait_until_running's polling loop succeeds immediately
+    instead of timing out against a bare MagicMock (whose .status
+    attribute is itself a MagicMock, never the literal string
+    'running'). Every test below that starts a real Sandbox needs this,
+    not a bare MagicMock() -- see _wait_until_running's own docstring
+    for why that readiness check exists at all."""
+
+    container = MagicMock()
+    container.status = "running"
+    return container
+
+
 def test_start_mounts_exactly_app_and_output_dirs(config):
     mock_client = MagicMock()
-    mock_client.containers.run.return_value = MagicMock()
+    mock_client.containers.run.return_value = _running_container()
 
     with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
         pass
@@ -48,7 +62,7 @@ def test_start_mounts_exactly_app_and_output_dirs(config):
 
 def test_start_uses_bridge_network_with_host_gateway(config):
     mock_client = MagicMock()
-    mock_client.containers.run.return_value = MagicMock()
+    mock_client.containers.run.return_value = _running_container()
 
     with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
         pass
@@ -60,7 +74,7 @@ def test_start_uses_bridge_network_with_host_gateway(config):
 
 def test_localhost_app_host_rewritten_to_host_gateway(config):
     mock_client = MagicMock()
-    mock_client.containers.run.return_value = MagicMock()
+    mock_client.containers.run.return_value = _running_container()
 
     with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
         pass
@@ -76,7 +90,7 @@ def test_non_local_app_host_left_unrewritten(tmp_path):
         image="x", app_path=str(app_dir), app_host="staging.example.com", app_port=443
     )
     mock_client = MagicMock()
-    mock_client.containers.run.return_value = MagicMock()
+    mock_client.containers.run.return_value = _running_container()
 
     with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
         pass
@@ -87,7 +101,7 @@ def test_non_local_app_host_left_unrewritten(tmp_path):
 
 def test_start_drops_all_capabilities(config):
     mock_client = MagicMock()
-    mock_client.containers.run.return_value = MagicMock()
+    mock_client.containers.run.return_value = _running_container()
 
     with patch("play_agent.sandbox.container.docker.from_env", return_value=mock_client), Sandbox(config):
         pass
@@ -115,7 +129,7 @@ def test_missing_app_path_raises_before_container_starts(tmp_path):
 
 def test_teardown_called_even_when_body_raises(config):
     mock_client = MagicMock()
-    mock_container = MagicMock()
+    mock_container = _running_container()
     mock_client.containers.run.return_value = mock_container
 
     with patch(
@@ -128,7 +142,7 @@ def test_teardown_called_even_when_body_raises(config):
 
 def test_teardown_swallows_docker_api_error_but_not_body_exception(config):
     mock_client = MagicMock()
-    mock_container = MagicMock()
+    mock_container = _running_container()
     mock_container.remove.side_effect = APIError("daemon unreachable")
     mock_client.containers.run.return_value = mock_container
 
@@ -157,7 +171,7 @@ def test_exec_run_times_out_on_hung_command(config):
         time.sleep(5)
 
     mock_client = MagicMock()
-    mock_container = MagicMock()
+    mock_container = _running_container()
     mock_container.exec_run.side_effect = hanging_exec_run
     mock_client.containers.run.return_value = mock_container
 

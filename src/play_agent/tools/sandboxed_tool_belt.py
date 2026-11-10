@@ -12,6 +12,7 @@ imply the Driver uses it, which it doesn't.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Self
 
 from play_agent.sandbox.container import Sandbox, SandboxConfig
 from play_agent.tools.contracts import (
@@ -51,7 +52,7 @@ class SandboxedToolBelt:
         # entered, without requiring Docker to be running at all.
         self._sandbox: Sandbox | None = None
 
-    def __enter__(self) -> SandboxedToolBelt:
+    def __enter__(self) -> Self:
         self._sandbox = Sandbox(self._config.sandbox_config)
         self._sandbox.__enter__()
         return self

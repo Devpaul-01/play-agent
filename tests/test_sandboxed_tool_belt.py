@@ -140,8 +140,9 @@ def test_apply_patch_does_not_require_started_sandbox(sandbox_config, tmp_path):
 
 
 def test_context_manager_starts_and_tears_down_sandbox(sandbox_config, mock_docker_container):
-    with _patched_client(mock_docker_container):
-        with SandboxedToolBelt(SandboxedToolBeltConfig(sandbox_config=sandbox_config)):
-            pass
+    with _patched_client(mock_docker_container), SandboxedToolBelt(
+        SandboxedToolBeltConfig(sandbox_config=sandbox_config)
+    ):
+        pass
 
     mock_docker_container.remove.assert_called_once_with(force=True)

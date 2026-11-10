@@ -321,11 +321,11 @@ Writes are synchronous at each state transition — a crash mid-run leaves a rea
 
 | Decision | Choice | Status |
 |---|---|---|
-| Orchestrator language | TypeScript/Node.js (recommended — Playwright tests and AST manipulation via the TypeScript Compiler API fit naturally) | **Recommended, not explicitly confirmed** |
+| Orchestrator language | Python (3.11+, `uv`) | **Confirmed** — supersedes this section's original TypeScript/Node.js recommendation; AST validation uses tree-sitter rather than the TypeScript Compiler API this recommendation assumed (see ADR-12) |
 | Persistence | SQLite | Agreed |
 | Sandbox isolation | Containers (Docker) | Agreed |
 | Agent orchestration | Hand-rolled state machine, no agent framework | Agreed |
-| LLM provider | Single provider behind a thin interface | **Not yet decided** — deliberately deferred |
+| LLM provider | Groq (`llama-3.3-70b-versatile` default), tool-calling for structured output | **Confirmed** — supersedes this section's original "not yet decided" |
 | LLM fallback | None | Agreed (reuses no fallback logic from prior projects) |
 | Durable workflow engine | None | Agreed — unjustified for short, idempotent runs |
 
@@ -346,15 +346,16 @@ Writes are synchronous at each state transition — a crash mid-run leaves a rea
 | ADR-9 | `probe_live_dom` added for live locator probing during diagnosis, same sandbox trust tier | Static trace/DOM evidence alone under-informs candidate ranking; live probing adds real signal without a new trust tier | Agreed |
 | ADR-10 | Component source added as read-only diagnosis evidence | Enables preferring stable locator strategies (e.g. `data-testid`) over whatever happened to match, not just any working match | Agreed |
 | ADR-11 | Evaluation includes comparative diagnosis-configuration testing and a first-class adversarial suite; confidence calibration and a mutation-based benchmark generator deferred | Maximizes evaluation rigor (the project's core differentiator) without diluting it across too many simultaneous additions | Agreed |
+| ADR-12 | Patch AST validation uses tree-sitter, not the TypeScript Compiler API originally assumed in §20 | Orchestrator language settled on Python (not TypeScript/Node.js), so a Python-native/embeddable parser was required; tree-sitter's `tree-sitter-typescript` grammar still validates the test file's actual TS/JS syntax without needing a Node.js subprocess for every validation call | Agreed |
 
 ---
 
 ## 22. Known Limitations and Unresolved Questions
 
-- **LLM provider not yet chosen.** The thin-interface abstraction (§12) accommodates any choice without architectural rework.
-- **Ephemeral/resettable app-under-test environment is assumed, not yet confirmed** — required before `probe_live_dom` is safe to use against anything but a throwaway environment (§2, §7).
-- **Component-source resolution mechanism** (source maps, dev-mode attributes, or structural matching) depends on the actual target frontend stack and is not yet pinned down (§2, §11).
-- **Orchestrator language (TypeScript vs. Python)** is recommended but not explicitly confirmed (§20).
+- **~~LLM provider not yet chosen.~~ Resolved: Groq.** The thin-interface abstraction (§12) was preserved regardless, so this required no architectural rework once decided.
+- **Ephemeral/resettable app-under-test environment is assumed, not yet confirmed** — required before `probe_live_dom` is safe to use against anything but a throwaway environment (§2, §7). Still open.
+- **Component-source resolution mechanism** (source maps, dev-mode attributes, or structural matching) depends on the actual target frontend stack and is not yet pinned down (§2, §11). Still open.
+- **~~Orchestrator language (TypeScript vs. Python) is recommended but not explicitly confirmed.~~ Resolved: Python**, with tree-sitter in place of the TypeScript Compiler API this section originally assumed (§20, ADR-12).
 - **Synthetic benchmark realism:** mutation-based scenarios necessarily understate real-world locator-breakage diversity; any reported metrics must carry that caveat (§16).
 - **Deferred, not rejected:** confidence calibration, a standalone mutation-based benchmark generator, broader repair types, PR/branch creation, multi-provider fallback. These are documented future extensions, not gaps in the current design.
 

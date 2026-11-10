@@ -23,6 +23,9 @@ class Config:
 
     app_under_test_path: str
     app_under_test_host: str
+    app_under_test_port: int
+
+    sandbox_image: str
 
     db_path: str
 
@@ -34,10 +37,20 @@ class Config:
                 raise ConfigError(f"Missing required environment variable: {name}")
             return value
 
+        port_str = os.environ.get("PLAY_AGENT_APP_PORT", "3000")
+        try:
+            port = int(port_str)
+        except ValueError as e:
+            raise ConfigError(
+                f"PLAY_AGENT_APP_PORT must be an integer, got: {port_str!r}"
+            ) from e
+
         return Config(
             groq_api_key=require("PLAY_AGENT_GROQ_API_KEY"),
             groq_model=os.environ.get("PLAY_AGENT_GROQ_MODEL", "llama-3.3-70b-versatile"),
             app_under_test_path=require("PLAY_AGENT_APP_PATH"),
             app_under_test_host=require("PLAY_AGENT_APP_HOST"),
+            app_under_test_port=port,
+            sandbox_image=os.environ.get("PLAY_AGENT_SANDBOX_IMAGE", "play-agent-sandbox:latest"),
             db_path=os.environ.get("PLAY_AGENT_DB_PATH", "play_agent.sqlite3"),
         )

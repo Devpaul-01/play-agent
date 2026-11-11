@@ -49,6 +49,7 @@ def test_defaults_applied_when_optional_vars_absent(monkeypatch):
     assert config.app_under_test_port == 3000
     assert config.sandbox_image == "play-agent-sandbox:latest"
     assert config.db_path == "play_agent.sqlite3"
+    assert config.log_path == "play_agent.log"
 
 
 def test_all_vars_read_when_present(monkeypatch):
@@ -59,6 +60,7 @@ def test_all_vars_read_when_present(monkeypatch):
             "PLAY_AGENT_APP_PORT": "5173",
             "PLAY_AGENT_SANDBOX_IMAGE": "custom-image:v2",
             "PLAY_AGENT_DB_PATH": "/tmp/custom.sqlite3",
+            "PLAY_AGENT_LOG_PATH": "/tmp/custom.log",
         },
     )
 
@@ -68,6 +70,7 @@ def test_all_vars_read_when_present(monkeypatch):
     assert config.app_under_test_port == 5173
     assert config.sandbox_image == "custom-image:v2"
     assert config.db_path == "/tmp/custom.sqlite3"
+    assert config.log_path == "/tmp/custom.log"
 
 
 def test_non_integer_app_port_raises_config_error(monkeypatch):

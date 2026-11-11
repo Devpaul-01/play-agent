@@ -38,6 +38,15 @@ def spec_file(tmp_path):
     return f
 
 
+@pytest.fixture
+def log_path(tmp_path):
+    # Every invocation below passes --log-path explicitly pointed at
+    # tmp_path -- without it, Config's log_path default (play_agent.log,
+    # relative to cwd) would write into wherever pytest happens to run
+    # from, i.e. the repo itself.
+    return str(tmp_path / "test.log")
+
+
 def test_repair_missing_config_exits_nonzero_with_message(runner, spec_file):
     # No env vars set -- Config.from_env should fail before anything else
     # is constructed.
@@ -47,9 +56,11 @@ def test_repair_missing_config_exits_nonzero_with_message(runner, spec_file):
     assert "Configuration error" in result.output
 
 
-def test_repair_nonexistent_test_file_rejected_by_click(runner):
+def test_repair_nonexistent_test_file_rejected_by_click(runner, log_path):
     result = runner.invoke(
-        cli, ["repair", "/nonexistent/file.spec.ts", "some test"], env=REQUIRED_ENV
+        cli,
+        ["repair", "/nonexistent/file.spec.ts", "some test", "--log-path", log_path],
+        env=REQUIRED_ENV,
     )
 
     assert result.exit_code != 0
@@ -60,7 +71,7 @@ def test_repair_nonexistent_test_file_rejected_by_click(runner):
 @patch("play_agent.cli.main.GroqDiagnoser")
 @patch("play_agent.cli.main.Store")
 def test_repair_succeeded_exits_zero(
-    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path
 ):
     mock_belt_cls.return_value.__enter__.return_value = MagicMock()
     mock_driver_cls.return_value.run.return_value = DriverResult(
@@ -68,7 +79,9 @@ def test_repair_succeeded_exits_zero(
     )
 
     result = runner.invoke(
-        cli, ["repair", str(spec_file), "completes checkout"], env=REQUIRED_ENV
+        cli,
+        ["repair", str(spec_file), "completes checkout", "--log-path", log_path],
+        env=REQUIRED_ENV,
     )
 
     assert result.exit_code == 0
@@ -81,7 +94,7 @@ def test_repair_succeeded_exits_zero(
 @patch("play_agent.cli.main.GroqDiagnoser")
 @patch("play_agent.cli.main.Store")
 def test_repair_failed_exits_nonzero(
-    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path
 ):
     mock_belt_cls.return_value.__enter__.return_value = MagicMock()
     mock_driver_cls.return_value.run.return_value = DriverResult(
@@ -89,7 +102,9 @@ def test_repair_failed_exits_nonzero(
     )
 
     result = runner.invoke(
-        cli, ["repair", str(spec_file), "completes checkout"], env=REQUIRED_ENV
+        cli,
+        ["repair", str(spec_file), "completes checkout", "--log-path", log_path],
+        env=REQUIRED_ENV,
     )
 
     assert result.exit_code == 1
@@ -100,7 +115,7 @@ def test_repair_failed_exits_nonzero(
 @patch("play_agent.cli.main.GroqDiagnoser")
 @patch("play_agent.cli.main.Store")
 def test_repair_rejected_reports_reason(
-    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path
 ):
     mock_belt_cls.return_value.__enter__.return_value = MagicMock()
     mock_driver_cls.return_value.run.return_value = DriverResult(
@@ -111,7 +126,9 @@ def test_repair_rejected_reports_reason(
     )
 
     result = runner.invoke(
-        cli, ["repair", str(spec_file), "completes checkout"], env=REQUIRED_ENV
+        cli,
+        ["repair", str(spec_file), "completes checkout", "--log-path", log_path],
+        env=REQUIRED_ENV,
     )
 
     assert result.exit_code == 1
@@ -122,12 +139,14 @@ def test_repair_rejected_reports_reason(
 @patch("play_agent.cli.main.GroqDiagnoser")
 @patch("play_agent.cli.main.Store")
 def test_repair_sandbox_error_exits_nonzero_with_message(
-    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, runner, spec_file
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, runner, spec_file, log_path
 ):
     mock_belt_cls.return_value.__enter__.side_effect = SandboxError("Docker daemon not reachable")
 
     result = runner.invoke(
-        cli, ["repair", str(spec_file), "completes checkout"], env=REQUIRED_ENV
+        cli,
+        ["repair", str(spec_file), "completes checkout", "--log-path", log_path],
+        env=REQUIRED_ENV,
     )
 
     assert result.exit_code == 1
@@ -139,7 +158,7 @@ def test_repair_sandbox_error_exits_nonzero_with_message(
 @patch("play_agent.cli.main.GroqDiagnoser")
 @patch("play_agent.cli.main.Store")
 def test_repair_reps_option_passed_through_to_belt_config(
-    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path
 ):
     mock_belt_cls.return_value.__enter__.return_value = MagicMock()
     mock_driver_cls.return_value.run.return_value = DriverResult(
@@ -148,9 +167,41 @@ def test_repair_reps_option_passed_through_to_belt_config(
 
     runner.invoke(
         cli,
-        ["repair", str(spec_file), "completes checkout", "--reps", "5"],
+        ["repair", str(spec_file), "completes checkout", "--reps", "5", "--log-path", log_path],
         env=REQUIRED_ENV,
     )
 
     belt_config = mock_belt_cls.call_args.args[0]
     assert belt_config.verification_reps == 5
+
+
+@patch("play_agent.cli.main.Driver")
+@patch("play_agent.cli.main.SandboxedToolBelt")
+@patch("play_agent.cli.main.GroqDiagnoser")
+@patch("play_agent.cli.main.Store")
+def test_repair_writes_log_file_at_given_path(
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path
+):
+    import json
+    from pathlib import Path
+
+    mock_belt_cls.return_value.__enter__.return_value = MagicMock()
+    mock_driver_cls.return_value.run.return_value = DriverResult(
+        run_id="abc123", final_phase=Phase.SUCCEEDED, rejection_reason=None, attempts_made=1
+    )
+
+    runner.invoke(
+        cli,
+        ["repair", str(spec_file), "completes checkout", "--log-path", log_path],
+        env=REQUIRED_ENV,
+    )
+
+    # Driver itself is mocked here, so no real transitions happen --
+    # this only confirms the CLI opens the log file at the path given
+    # (an empty, valid file is still proof the path/open logic works;
+    # test_driver.py's own logger tests cover line content).
+    assert Path(log_path).exists()
+    content = Path(log_path).read_text()
+    for line in content.splitlines():
+        if line.strip():
+            json.loads(line)  # must be valid JSON if anything was written

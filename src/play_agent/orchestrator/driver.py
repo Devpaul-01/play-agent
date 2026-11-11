@@ -13,11 +13,13 @@ tested with fakes standing in for those, not real ones.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from play_agent.observability.logging import RunLogger
 from play_agent.orchestrator.groq_diagnoser import DiagnosisResult, TokenUsage
 from play_agent.orchestrator.states import (
     Candidate,
@@ -89,7 +91,13 @@ class DriverResult:
 class Driver:
     """Runs one repair attempt from start to terminal state."""
 
-    def __init__(self, store: Store, tools: ToolBelt, diagnoser: Diagnoser) -> None:
+    def __init__(
+        self,
+        store: Store,
+        tools: ToolBelt,
+        diagnoser: Diagnoser,
+        logger: RunLogger | None = None,
+    ) -> None:
         self._store = store
         self._tools = tools
         self._diagnoser = diagnoser
@@ -99,10 +107,18 @@ class Driver:
         # not state-machine-relevant. Not elegant, but honest about the gap
         # it's closing rather than leaving token_usage_* columns NULL.
         self._pending_usage: TokenUsage | None = None
+        # Optional (Sec17 observability is a debugging aid, not a
+        # correctness requirement) -- None is a valid, fully-supported
+        # value, so every existing caller/test that never passed a
+        # logger keeps working unchanged.
+        self._logger = logger
 
     def run(self, test_file_path: str, test_title: str) -> DriverResult:
         run_id = str(uuid.uuid4())
         test_identifier = f"{test_file_path}::{test_title}"
+
+        if self._logger is not None:
+            self._logger.set_run_id(run_id)
 
         self._store.create_run(Run(id=run_id, test_identifier=test_identifier))
 
@@ -110,8 +126,18 @@ class Driver:
         attempts_made = 0
 
         while not state.is_terminal():
+            from_phase = state.phase
+            step_start = time.monotonic()
             state, attempts_made = self._step(state, test_file_path, test_title, attempts_made)
+            duration_ms = (time.monotonic() - step_start) * 1000
+            if self._logger is not None:
+                self._logger.transition(from_phase.value, state.phase.value, duration_ms)
             self._persist_run_state(state)
+
+        if self._logger is not None:
+            self._logger.run_completed(
+                state.phase.value, state.rejection_reason, attempts_made
+            )
 
         return DriverResult(
             run_id=run_id,
@@ -125,7 +151,14 @@ class Driver:
     ) -> tuple[RunState, int]:
         match state.phase:
             case Phase.COLLECTING_EVIDENCE:
+                call_start = time.monotonic()
                 evidence = self._tools.collect_failure_evidence(test_file_path, test_title)
+                self._log_tool_call(
+                    "collect_failure_evidence",
+                    {"test_file_path": test_file_path, "test_title": test_title},
+                    evidence,
+                    call_start,
+                )
                 event = EvidenceCollected(evidence=evidence.__dict__)
                 return transition(state, event), attempts_made
 
@@ -137,6 +170,17 @@ class Driver:
                     evidence, test_source, is_re_diagnosis=is_re_diagnosis
                 )
                 self._pending_usage = diagnosis.usage
+                if self._logger is not None:
+                    self._logger.diagnosis(
+                        request_summary={
+                            "evidence": evidence.__dict__,
+                            "is_re_diagnosis": is_re_diagnosis,
+                        },
+                        response_summary={
+                            "candidates": [vars(c) for c in diagnosis.candidates]
+                        },
+                        passed_validation=None,  # resolved later, at VALIDATING_PROPOSAL
+                    )
                 event = DiagnosisCompleted(candidates=diagnosis.candidates)
                 return transition(state, event), attempts_made
 
@@ -151,9 +195,30 @@ class Driver:
             case Phase.VALIDATING_PROPOSAL:
                 candidate = state.current_candidate
                 assert candidate is not None
+                call_start = time.monotonic()
                 result = self._tools.apply_patch(
                     test_file_path, candidate.locator_call_id, candidate.new_locator_expr
                 )
+                self._log_tool_call(
+                    "apply_patch",
+                    {
+                        "test_file_path": test_file_path,
+                        "locator_call_id": candidate.locator_call_id,
+                        "new_locator_expression": candidate.new_locator_expr,
+                    },
+                    result,
+                    call_start,
+                )
+                if self._logger is not None:
+                    # Resolves the passed_validation flag Sec17 asks the
+                    # diagnosis log line to carry -- logged as its own
+                    # follow-up line rather than mutating the earlier
+                    # diagnosis line, since this module only ever appends.
+                    self._logger.diagnosis(
+                        request_summary={"candidate": vars(candidate)},
+                        response_summary={"reason": result.reason},
+                        passed_validation=result.applied,
+                    )
                 event = ProposalValidated(valid=result.applied, reason=result.reason)
                 return transition(state, event), attempts_made
 
@@ -163,13 +228,26 @@ class Driver:
                 return transition(state, event), attempts_made
 
             case Phase.VERIFYING:
+                call_start = time.monotonic()
                 result = self._tools.run_verification(test_file_path, test_title)
+                self._log_tool_call(
+                    "run_verification",
+                    {"test_file_path": test_file_path, "test_title": test_title},
+                    result,
+                    call_start,
+                )
                 event = VerificationCompleted(outcome=result.outcome)
                 self._persist_attempt(state, result)
                 return transition(state, event), attempts_made
 
             case _:
                 raise AssertionError(f"_step called with terminal phase {state.phase}")
+
+    def _log_tool_call(self, tool_name: str, inputs: dict, output: object, call_start: float) -> None:
+        if self._logger is None:
+            return
+        duration_ms = (time.monotonic() - call_start) * 1000
+        self._logger.tool_call(tool_name, inputs, output, duration_ms)
 
     def _persist_run_state(self, state: RunState) -> None:
         final_state = None

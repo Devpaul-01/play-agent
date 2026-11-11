@@ -16,11 +16,12 @@ from dataclasses import dataclass
 
 import pytest
 
+from play_agent.observability.logging import RunLogger
 from play_agent.orchestrator.driver import Driver
+from play_agent.orchestrator.groq_diagnoser import DiagnosisResult, TokenUsage
 from play_agent.orchestrator.states import Candidate, Phase
 from play_agent.store.models import FinalState, VerificationOutcome
 from play_agent.store.store import Store
-from play_agent.orchestrator.groq_diagnoser import DiagnosisResult, TokenUsage
 from play_agent.tools.contracts import FailureEvidence, PatchApplyResult, VerificationResult
 
 
@@ -286,3 +287,68 @@ def test_run_persists_immediately_even_if_driver_were_interrupted(store: Store, 
     run = store.get_run(result.run_id)
     assert run is not None
     assert run.test_identifier == f"{test_file}::completes checkout"
+
+
+def test_driver_with_logger_emits_transition_and_tool_call_lines(store: Store, test_file, tmp_path):
+    import json
+
+    evidence = make_evidence(str(test_file))
+    tools = FakeToolBelt(
+        evidence=evidence,
+        apply_results=[PatchApplyResult(applied=True, reason=None, diff="...")],
+        verification_results=[VerificationResult(outcome="pass", reps_run=3, logs="ok")],
+    )
+    diagnoser = FakeDiagnoser(
+        first_call_candidates=(Candidate(rank=1, locator_call_id="L1C1", reasoning="stale testid"),),
+        re_diagnosis_candidates=(),
+        proposed_exprs={"L1C1": 'page.getByTestId("x")'},
+    )
+    log_path = tmp_path / "run.log"
+
+    with RunLogger.to_file("pending", log_path) as logger:
+        driver = Driver(store=store, tools=tools, diagnoser=diagnoser, logger=logger)
+        result = driver.run(str(test_file), "completes checkout")
+
+    assert result.final_phase == Phase.SUCCEEDED
+
+    lines = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+    events = [line["event"] for line in lines]
+
+    # The real run_id (minted inside Driver.run()) must appear on every
+    # line, not the "pending" placeholder passed at construction time --
+    # Driver.run() is responsible for correcting it via set_run_id as its
+    # first action.
+    assert all(line["run_id"] == result.run_id for line in lines)
+    assert all(line["run_id"] != "pending" for line in lines)
+
+    # At least one transition per phase change, at least one tool_call
+    # per real tool invocation, a diagnosis line, and a final summary.
+    assert "transition" in events
+    assert "tool_call" in events
+    assert "diagnosis" in events
+    assert events[-1] == "run_completed"
+
+    tool_names = {line["tool"] for line in lines if line["event"] == "tool_call"}
+    assert tool_names == {"collect_failure_evidence", "apply_patch", "run_verification"}
+
+
+def test_driver_without_logger_does_not_raise(store: Store, test_file):
+    # logger=None (the default) must remain fully supported -- this is
+    # the same construction every other test in this file already uses,
+    # asserted explicitly here as a regression guard.
+    evidence = make_evidence(str(test_file))
+    tools = FakeToolBelt(
+        evidence=evidence,
+        apply_results=[PatchApplyResult(applied=True, reason=None, diff="...")],
+        verification_results=[VerificationResult(outcome="pass", reps_run=3, logs="ok")],
+    )
+    diagnoser = FakeDiagnoser(
+        first_call_candidates=(Candidate(rank=1, locator_call_id="L1C1", reasoning="x"),),
+        re_diagnosis_candidates=(),
+        proposed_exprs={"L1C1": 'page.getByTestId("x")'},
+    )
+
+    driver = Driver(store=store, tools=tools, diagnoser=diagnoser)
+    result = driver.run(str(test_file), "completes checkout")
+
+    assert result.final_phase == Phase.SUCCEEDED

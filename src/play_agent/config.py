@@ -28,6 +28,7 @@ class Config:
     sandbox_image: str
 
     db_path: str
+    log_path: str
 
     @staticmethod
     def from_env() -> Config:
@@ -53,4 +54,5 @@ class Config:
             app_under_test_port=port,
             sandbox_image=os.environ.get("PLAY_AGENT_SANDBOX_IMAGE", "play-agent-sandbox:latest"),
             db_path=os.environ.get("PLAY_AGENT_DB_PATH", "play_agent.sqlite3"),
+            log_path=os.environ.get("PLAY_AGENT_LOG_PATH", "play_agent.log"),
         )

@@ -15,6 +15,7 @@ import sys
 import click
 
 from play_agent.config import Config, ConfigError
+from play_agent.observability.logging import RunLogger
 from play_agent.orchestrator.driver import Driver, DriverResult
 from play_agent.orchestrator.groq_diagnoser import GroqDiagnoser
 from play_agent.orchestrator.states import Phase
@@ -37,7 +38,13 @@ def cli() -> None:
     show_default=True,
     help="Number of verification reps run before trusting a fix as non-flaky.",
 )
-def repair(test_file_path: str, test_title: str, reps: int) -> None:
+@click.option(
+    "--log-path",
+    default=None,
+    help="Path to append structured JSON run logs to (Sec17). Defaults to "
+    "PLAY_AGENT_LOG_PATH, or play_agent.log if that's unset too.",
+)
+def repair(test_file_path: str, test_title: str, reps: int, log_path: str | None) -> None:
     """Attempt to repair a failing test's stale locator.
 
     TEST_FILE_PATH is the path to the Playwright spec file containing
@@ -61,12 +68,15 @@ def repair(test_file_path: str, test_title: str, reps: int) -> None:
 
     store = Store(config.db_path)
     diagnoser = GroqDiagnoser(api_key=config.groq_api_key, model=config.groq_model)
-
     try:
-        with SandboxedToolBelt(
+        # "pending" is corrected to the real run_id as Driver.run()'s
+        # first action (RunLogger.set_run_id) -- the log file must be
+        # opened before that id exists, since the id itself is minted
+        # inside the call this logger needs to observe.
+        with RunLogger.to_file("pending", log_path or config.log_path) as logger, SandboxedToolBelt(
             SandboxedToolBeltConfig(sandbox_config=sandbox_config, verification_reps=reps)
         ) as tools:
-            driver = Driver(store=store, tools=tools, diagnoser=diagnoser)
+            driver = Driver(store=store, tools=tools, diagnoser=diagnoser, logger=logger)
             result = driver.run(test_file_path, test_title)
     except SandboxError as e:
         click.echo(f"Sandbox error: {e}", err=True)

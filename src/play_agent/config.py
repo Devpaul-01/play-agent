@@ -29,6 +29,12 @@ class Config:
 
     db_path: str
     log_path: str
+    # M3/Sec11: the frontend's component source root, for
+    # component-source evidence resolution. Optional -- a missing root
+    # just means that evidence is omitted, not a config error, since
+    # it's additive context rather than a hard dependency (see
+    # SandboxedToolBeltConfig.component_src_root's own docstring).
+    component_src_root: str | None
 
     @staticmethod
     def from_env() -> Config:
@@ -55,4 +61,5 @@ class Config:
             sandbox_image=os.environ.get("PLAY_AGENT_SANDBOX_IMAGE", "play-agent-sandbox:latest"),
             db_path=os.environ.get("PLAY_AGENT_DB_PATH", "play_agent.sqlite3"),
             log_path=os.environ.get("PLAY_AGENT_LOG_PATH", "play_agent.log"),
+            component_src_root=os.environ.get("PLAY_AGENT_COMPONENT_SRC_ROOT"),
         )

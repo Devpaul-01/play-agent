@@ -66,6 +66,14 @@ def repair(test_file_path: str, test_title: str, reps: int, log_path: str | None
         app_port=config.app_under_test_port,
     )
 
+    if config.component_src_root is None:
+        click.echo(
+            "Note: PLAY_AGENT_COMPONENT_SRC_ROOT is not set -- diagnosis will "
+            "run without component-source evidence (Sec11). Set it to the "
+            "frontend's src/ directory for better repair quality.",
+            err=True,
+        )
+
     store = Store(config.db_path)
     diagnoser = GroqDiagnoser(api_key=config.groq_api_key, model=config.groq_model)
     try:
@@ -74,7 +82,11 @@ def repair(test_file_path: str, test_title: str, reps: int, log_path: str | None
         # opened before that id exists, since the id itself is minted
         # inside the call this logger needs to observe.
         with RunLogger.to_file("pending", log_path or config.log_path) as logger, SandboxedToolBelt(
-            SandboxedToolBeltConfig(sandbox_config=sandbox_config, verification_reps=reps)
+            SandboxedToolBeltConfig(
+                sandbox_config=sandbox_config,
+                verification_reps=reps,
+                component_src_root=config.component_src_root,
+            )
         ) as tools:
             driver = Driver(store=store, tools=tools, diagnoser=diagnoser, logger=logger)
             result = driver.run(test_file_path, test_title)

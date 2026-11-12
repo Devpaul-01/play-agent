@@ -146,3 +146,151 @@ def test_context_manager_starts_and_tears_down_sandbox(sandbox_config, mock_dock
         pass
 
     mock_docker_container.remove.assert_called_once_with(force=True)
+
+
+def test_collect_failure_evidence_without_component_src_root_leaves_context_none(
+    sandbox_config, tmp_path
+):
+    # component_src_root defaults to None -- evidence collection must
+    # not be affected at all when it's unset.
+    report = tmp_path / "results.json"
+    report.write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "file": "checkout.spec.ts",
+                        "specs": [
+                            {
+                                "title": "t",
+                                "tests": [
+                                    {
+                                        "results": [
+                                            {
+                                                "status": "failed",
+                                                "error": {"message": "boom", "stack": ""},
+                                                "attachments": [],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    test_file = tmp_path / "checkout.spec.ts"
+    test_file.write_text('page.getByTestId("login-username").fill("x");')
+
+    belt = SandboxedToolBelt(
+        SandboxedToolBeltConfig(sandbox_config=sandbox_config, report_path=str(report))
+    )
+    evidence = belt.collect_failure_evidence(str(test_file), "t")
+
+    assert evidence.component_source_context is None
+
+
+def test_collect_failure_evidence_resolves_component_source_when_configured(
+    sandbox_config, tmp_path
+):
+    report = tmp_path / "results.json"
+    report.write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "file": "checkout.spec.ts",
+                        "specs": [
+                            {
+                                "title": "t",
+                                "tests": [
+                                    {
+                                        "results": [
+                                            {
+                                                "status": "failed",
+                                                "error": {"message": "boom", "stack": ""},
+                                                "attachments": [],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    test_file = tmp_path / "checkout.spec.ts"
+    test_file.write_text('page.getByTestId("login-username").fill("x");')
+
+    component_src = tmp_path / "frontend" / "src"
+    component_src.mkdir(parents=True)
+    (component_src / "LoginPage.tsx").write_text(
+        '<input data-testid="login-username" value={username} />'
+    )
+
+    belt = SandboxedToolBelt(
+        SandboxedToolBeltConfig(
+            sandbox_config=sandbox_config,
+            report_path=str(report),
+            component_src_root=str(component_src),
+        )
+    )
+    evidence = belt.collect_failure_evidence(str(test_file), "t")
+
+    assert evidence.component_source_context is not None
+    assert "login-username" in evidence.component_source_context
+    assert "LoginPage.tsx" in evidence.component_source_context
+
+
+def test_collect_failure_evidence_unresolvable_locator_leaves_context_none(
+    sandbox_config, tmp_path
+):
+    report = tmp_path / "results.json"
+    report.write_text(
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "file": "checkout.spec.ts",
+                        "specs": [
+                            {
+                                "title": "t",
+                                "tests": [
+                                    {
+                                        "results": [
+                                            {
+                                                "status": "failed",
+                                                "error": {"message": "boom", "stack": ""},
+                                                "attachments": [],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+    )
+    test_file = tmp_path / "checkout.spec.ts"
+    test_file.write_text('page.getByTestId("nonexistent-testid").fill("x");')
+
+    component_src = tmp_path / "frontend" / "src"
+    component_src.mkdir(parents=True)
+    (component_src / "LoginPage.tsx").write_text('<input data-testid="login-username" />')
+
+    belt = SandboxedToolBelt(
+        SandboxedToolBeltConfig(
+            sandbox_config=sandbox_config,
+            report_path=str(report),
+            component_src_root=str(component_src),
+        )
+    )
+    evidence = belt.collect_failure_evidence(str(test_file), "t")
+
+    assert evidence.component_source_context is None

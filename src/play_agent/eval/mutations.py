@@ -43,8 +43,9 @@ class MutationType(str, Enum):
 
 @dataclass(frozen=True)
 class Mutation:
-    """One mutation: where it applies, what it changes, and the ground
-    truth a benchmark run checks a repair against."""
+    """One mutation: where it applies, what it changes, which real test
+    exercises the mutated element, and the ground truth a benchmark run
+    checks a repair against."""
 
     mutation_type: MutationType
     component_file: str  # relative to the component source root
@@ -56,6 +57,13 @@ class Mutation:
     # correct non-empty repair -- a correctly-behaving agent should
     # reject the repair, not propose one, so this is None.
     correct_repair_testid: str | None
+    # The real fixture-app test (relative to its tests/ directory, and
+    # its exact title) that exercises original_testid -- what a
+    # comparison-runner scenario actually runs after mutating. Required
+    # for a mutation to be runnable end-to-end; a Mutation used only for
+    # apply_mutation's own unit tests can leave this None.
+    test_file: str | None = None
+    test_title: str | None = None
 
 
 @dataclass(frozen=True)

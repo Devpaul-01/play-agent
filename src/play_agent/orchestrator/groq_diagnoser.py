@@ -261,6 +261,18 @@ def _build_diagnosis_prompt(
         else ""
     )
 
+    component_source_section = (
+        f"""
+Relevant component source (resolved from the test's locator calls; this \
+is how the actual UI renders the elements the test targets -- use it to \
+judge what a stable replacement locator would look like, e.g. a \
+data-testid the component already defines):
+{evidence.component_source_context}
+"""
+        if evidence.component_source_context
+        else ""
+    )
+
     return f"""A Playwright test has failed. Diagnose whether this is a stale \
 element locator (the UI still has the element, but the way the test finds \
 it broke) that can be repaired by changing only the locator expression.
@@ -276,7 +288,7 @@ Stack trace:
 
 Test source (locator calls are what you may propose replacing):
 {test_source}
-{retry_note}
+{component_source_section}{retry_note}
 
 Only propose a fix if you believe this is genuinely a stale-locator issue. \
 If the failure looks like a real application bug, an unrelated timeout, or \
@@ -284,6 +296,15 @@ something else that changing a locator cannot fix, report repairable=false."""
 
 
 def _build_repair_prompt(evidence: FailureEvidence, candidate: Candidate) -> str:
+    component_source_section = (
+        f"""
+Relevant component source:
+{evidence.component_source_context}
+"""
+        if evidence.component_source_context
+        else ""
+    )
+
     return f"""You previously diagnosed a candidate locator repair for a \
 failing Playwright test. Propose the exact replacement locator expression.
 
@@ -292,7 +313,7 @@ Error: {evidence.error_message}
 
 Candidate locator_call_id: {candidate.locator_call_id}
 Diagnosis reasoning: {candidate.reasoning}
-
+{component_source_section}
 Report only the new locator expression -- a single Playwright locator-\
 builder call or chain, using only allowlisted methods with literal \
 arguments."""

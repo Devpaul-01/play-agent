@@ -26,7 +26,7 @@ from play_agent.orchestrator.states import Candidate
 from play_agent.tools.contracts import FailureEvidence
 
 
-def make_evidence() -> FailureEvidence:
+def make_evidence(component_source_context: str | None = None) -> FailureEvidence:
     return FailureEvidence(
         test_file_path="checkout.spec.ts",
         test_title="completes checkout",
@@ -34,6 +34,7 @@ def make_evidence() -> FailureEvidence:
         stack_trace="at checkout.spec.ts:12",
         screenshot_path=None,
         trace_path=None,
+        component_source_context=component_source_context,
     )
 
 
@@ -249,3 +250,62 @@ def test_diagnose_with_usage_handles_missing_usage_gracefully():
 
     assert result.usage.prompt_tokens == 0
     assert result.usage.estimated_cost_usd == 0.0
+
+
+# -- component_source_context in prompts (M3, Sec11) -------------------------
+
+
+def test_diagnosis_prompt_includes_component_source_context_when_present():
+    response = make_tool_call_response("report_diagnosis", {"repairable": False, "candidates": []})
+    client = FakeGroqClient(responses=[response])
+    diagnoser = GroqDiagnoser(api_key="unused", model="test-model", client=client)
+
+    evidence = make_evidence(
+        component_source_context='# L1C1: page.getByTestId("x")\n<input data-testid="x" />'
+    )
+    diagnoser.diagnose_with_usage(evidence, test_source="...", is_re_diagnosis=False)
+
+    prompt = client.captured_calls[0]["messages"][0]["content"]
+    assert 'data-testid="x"' in prompt
+    assert "Relevant component source" in prompt
+
+
+def test_diagnosis_prompt_omits_component_source_section_when_absent():
+    response = make_tool_call_response("report_diagnosis", {"repairable": False, "candidates": []})
+    client = FakeGroqClient(responses=[response])
+    diagnoser = GroqDiagnoser(api_key="unused", model="test-model", client=client)
+
+    diagnoser.diagnose_with_usage(make_evidence(), test_source="...", is_re_diagnosis=False)
+
+    prompt = client.captured_calls[0]["messages"][0]["content"]
+    assert "Relevant component source" not in prompt
+
+
+def test_repair_prompt_includes_component_source_context_when_present():
+    response = make_tool_call_response(
+        "report_repair_expression", {"new_locator_expression": 'page.getByTestId("x")'}
+    )
+    client = FakeGroqClient(responses=[response])
+    diagnoser = GroqDiagnoser(api_key="unused", model="test-model", client=client)
+
+    evidence = make_evidence(component_source_context="<input data-testid=\"stable-id\" />")
+    candidate = Candidate(rank=1, locator_call_id="L1C1", reasoning="stale class selector")
+
+    diagnoser.propose_repair(evidence, candidate)
+
+    prompt = client.captured_calls[0]["messages"][0]["content"]
+    assert "stable-id" in prompt
+
+
+def test_repair_prompt_omits_component_source_section_when_absent():
+    response = make_tool_call_response(
+        "report_repair_expression", {"new_locator_expression": 'page.getByTestId("x")'}
+    )
+    client = FakeGroqClient(responses=[response])
+    diagnoser = GroqDiagnoser(api_key="unused", model="test-model", client=client)
+
+    candidate = Candidate(rank=1, locator_call_id="L1C1", reasoning="stale class selector")
+    diagnoser.propose_repair(make_evidence(), candidate)
+
+    prompt = client.captured_calls[0]["messages"][0]["content"]
+    assert "Relevant component source" not in prompt

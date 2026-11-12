@@ -34,6 +34,16 @@ class FailureEvidence:
     stack_trace: str
     screenshot_path: str | None
     trace_path: str | None
+    # Sec11's "relevant component source file(s), resolved
+    # deterministically" -- pre-formatted text (not structured data),
+    # since it's assembled once by whichever ToolBelt resolves it
+    # (component_source.resolve_component_source, M3) and then only ever
+    # read as context by the diagnoser, never re-parsed. None when no
+    # component source root was configured, or nothing resolved --
+    # collect_failure_evidence (the free function) never sets this
+    # itself; it's populated by SandboxedToolBelt, which is the layer
+    # that actually knows where the frontend's src/ lives.
+    component_source_context: str | None = None
 
 
 @dataclass(frozen=True)

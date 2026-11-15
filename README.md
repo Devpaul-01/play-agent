@@ -150,8 +150,8 @@ These are real, current gaps, not future ideas:
    fixture's `playwright.config.ts` before a real run.
 3. **`repair` edits the test file in place** and **never prints or saves
    the diff**, although its success message tells you to review one. The
-   design (Sec7) says the original working-tree file is never touched and
-   the diff is the deliverable. Until that's fixed, run the agent on a
+   design says the original working-tree file is never touched (Sec7) and
+   that a diff file plus a markdown summary is the deliverable (Sec19). Until that's fixed, run the agent on a
    throwaway copy or a clean git working tree and use `git diff`.
 4. **Unhandled errors.** A missing Playwright report (`ToolError`) or a
    malformed model response (`DiagnoserError`) is not caught by the Driver

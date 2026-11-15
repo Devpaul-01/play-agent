@@ -29,9 +29,9 @@ This is a single-developer portfolio project, not a production service. Its purp
 - Durable workflow-engine-style crash resumption (see §19 — runs are short and idempotent; "just rerun it" is the correct recovery story).
 - Model training/fine-tuning, GPU/distributed serving, vector DB/RAG, voice/video agents, multi-agent swarms, support for every test framework or LLM provider.
 
-**Assumptions requiring validation (not yet confirmed — flag explicitly, do not treat as settled):**
-- The app-under-test runs against an ephemeral/resettable test environment. `probe_live_dom` replays navigation/actions up to the failure point, which can trigger real side effects (e.g. writing to a database) if the environment is not disposable. This must be confirmed before `probe_live_dom` is used against anything but a throwaway environment.
-- The target frontend framework/build (assumed React, based on the author's general stack, but not explicitly confirmed for this project) determines how component source files are resolved from a rendered DOM element for the frontend-source-read feature (§10, §12). The exact resolution mechanism (source maps, dev-mode debug attributes, or text/structure matching) is an implementation detail to confirm once the target app is known.
+**Assumptions (status as of the first full implementation pass — see §24):**
+- ~~The app-under-test runs against an ephemeral/resettable test environment.~~ **Confirmed for the fixture app only.** The fixture exposes `POST /api/_reset` backed by an in-memory store, and `statelessness.spec.ts` proves it restores the seeded baseline. `probe_live_dom` replays navigation/actions, which can trigger real side effects, so this still must be re-confirmed for any *other* app before `probe_live_dom` is pointed at it.
+- ~~The target frontend framework/build is unconfirmed.~~ **Confirmed:** the fixture app is React 19 + TypeScript built with Vite (source maps enabled). The resolution mechanism chosen is **structural matching** against component `.tsx` source, not source maps — see §24.
 
 **Constraints:**
 - Must run on modest local/CI hardware using hosted LLM APIs — no local model hosting.
@@ -368,3 +368,81 @@ Writes are synchronous at each state transition — a crash mid-run leaves a rea
 3. **M3 — Richer evidence:** `probe_live_dom` and component-source evidence integrated into diagnosis. *Acceptance:* diagnosis demonstrably prefers a more stable locator when one is available in source, measurable via the benchmark.
 4. **M4 — Evaluation harness:** synthetic benchmark generation, metric computation, comparative evaluation across ≥2 diagnosis configurations, adversarial suite with per-case layer-blocked reporting. *Acceptance:* a results table exists showing success/false-repair/correct-rejection rates per configuration, plus the adversarial suite's pass results.
 5. **M5 — CLI/CI polish:** full CLI UX, CI integration, observability logging, redaction/retention policy, documentation. *Acceptance:* the tool is runnable end-to-end by someone other than the author, from a failing test to a reviewed diff.
+
+---
+
+## 24. Implementation Status and Known Deviations
+
+This section records where the code differs from, or has not yet met, the
+design above. §1–§23 describe the agreed design; this section describes
+reality. `docs/checklist.md` is the item-by-item tracker.
+
+**Status:** all components in M1–M5 exist and are unit-tested (191 tests).
+The full pipeline has **not** been run end-to-end against a live Docker
+daemon and a real Groq key, so nothing below should be read as proven in
+operation.
+
+### Resolved design questions
+
+- **Component-source resolution mechanism (§2, §11).** Chosen: structural
+  matching. There is no running bundled app whose source maps could be
+  unwound; what exists is the component source tree and a locator's target
+  description. `tools/component_source.py` searches `*.tsx` for the JSX a
+  locator targets and returns the matching file, line range and a small
+  surrounding snippet — deliberately not whole files (§11). It handles
+  exact `data-testid` values, template-literal testids by their static
+  prefix (e.g. `` `task-row-${id}` `` matches `task-row-task-1`), and
+  text/role locators, and reports **ambiguity** when one testid appears in
+  several places (the fixture's `task-detail-modal` renders in two
+  conditional branches). The prefix match is intentionally looser than an
+  exact match because it approximates a value the resolver cannot compute.
+- **Orchestrator language and LLM provider.** Python and Groq; see §20 and
+  ADR-12.
+
+### Deviations from the design
+
+- **`apply_patch` writes in place (§7).** §7 says the patch is written to
+  an isolated copy and the original working-tree file is never touched.
+  The implementation writes directly to the path it is given, on the
+  premise that the sandbox mount makes that path "the sandboxed copy".
+  `play-agent repair` does not arrange such a copy, so it currently edits
+  the real file. The evaluation runner is unaffected (it works on a
+  scratch copy of the whole app per scenario). **This is the most
+  important deviation to close.**
+- **The diff and report are not surfaced.** §2, §3 and §5 make a diff
+  plus a report the deliverable, and §19 specifies "a diff file plus a
+  markdown summary". `apply_patch` returns a unified diff, but the Driver
+  does not store it and the CLI neither prints it nor writes a diff file
+  or markdown summary, while the CLI's success message tells the user to
+  review one.
+- **Errors are not handled (§12).** `ToolError` and `DiagnoserError` are
+  not caught by the Driver or CLI, so a missing Playwright report or a
+  malformed model response is a traceback and leaves the run row
+  unfinished. The §12 split between transient and semantic retry paths is
+  not implemented; there is no retry layer around the Groq call beyond
+  the SDK's own defaults.
+- **`probe_live_dom` is incomplete (§7, M3).** The Python side is
+  implemented and tested against a fake sandbox. Its Node script,
+  `scripts/probe_dom.js`, is invoked at `/app/scripts/probe_dom.js`, but
+  the sandbox mounts only the app under test and an output directory, so
+  that path does not resolve to this repository's script. The Driver also
+  never calls the tool, so it contributes no diagnosis evidence.
+- **Evidence collection assumes a JSON reporter (§7).**
+  `collect_failure_evidence` reads Playwright's `--reporter=json` output.
+  The fixture app's config uses the `list` reporter, so a real run against
+  it fails at evidence collection until a JSON reporter is added there.
+
+### Evaluation harness scope (§16)
+
+- Two of the four named mutation types are implemented (attribute rename,
+  element removal). DOM restructure and sibling reorder are deferred: a
+  text-level mutation cannot restructure JSX without risking invalid JSX,
+  which would break the "known-passing" premise of a controlled mutation.
+- The adversarial suite feeds attacker-chosen payloads directly into the
+  orchestrator's validation layer (Sec8 layer 2) and records which
+  scenarios are blocked and why. It does not exercise layers 3–4 (covered
+  by the sandbox tests) and does not test whether injected evidence can
+  steer a real model into proposing a malicious payload. That stronger
+  claim is deferred.
+- The comparison runner is library-only; there is no CLI command, and no
+  benchmark results exist yet.

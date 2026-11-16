@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
 from play_agent.observability.logging import RunLogger
-from play_agent.orchestrator.groq_diagnoser import DiagnosisResult, TokenUsage
+from play_agent.orchestrator.groq_diagnoser import DiagnoserError, DiagnosisResult, TokenUsage
 from play_agent.orchestrator.states import (
     Candidate,
     DiagnosisCompleted,
@@ -42,7 +42,12 @@ from play_agent.store.models import (
     utc_now_iso,
 )
 from play_agent.store.store import Store
-from play_agent.tools.contracts import FailureEvidence, PatchApplyResult, VerificationResult
+from play_agent.tools.contracts import (
+    FailureEvidence,
+    PatchApplyResult,
+    ToolError,
+    VerificationResult,
+)
 
 
 class Diagnoser(Protocol):
@@ -128,7 +133,27 @@ class Driver:
         while not state.is_terminal():
             from_phase = state.phase
             step_start = time.monotonic()
-            state, attempts_made = self._step(state, test_file_path, test_title, attempts_made)
+            try:
+                state, attempts_made = self._step(state, test_file_path, test_title, attempts_made)
+            except (ToolError, DiagnoserError) as e:
+                # Expected infrastructure/protocol failures (a missing
+                # Playwright report, a malformed or unreachable model):
+                # end the run cleanly as FAILED with the reason recorded,
+                # rather than leaving the run row unfinished behind a
+                # traceback. These are not semantic rejections -- the
+                # state machine's REJECTED means "diagnosed as not
+                # locator-repairable"; this is "the run could not finish".
+                state = self._fail_state(state, f"{type(e).__name__}: {e}")
+            except Exception as e:
+                # A bug, not an expected failure. Still finalize the run
+                # row so it isn't left dangling, then re-raise: swallowing
+                # a genuine bug into a tidy FAILED would hide it.
+                reason = f"unexpected {type(e).__name__}: {e}"
+                failed = self._fail_state(state, reason)
+                self._persist_run_state(failed)
+                if self._logger is not None:
+                    self._logger.run_completed(failed.phase.value, reason, attempts_made)
+                raise
             duration_ms = (time.monotonic() - step_start) * 1000
             if self._logger is not None:
                 self._logger.transition(from_phase.value, state.phase.value, duration_ms)
@@ -242,6 +267,10 @@ class Driver:
 
             case _:
                 raise AssertionError(f"_step called with terminal phase {state.phase}")
+
+    @staticmethod
+    def _fail_state(state: RunState, reason: str) -> RunState:
+        return replace(state, phase=Phase.FAILED, rejection_reason=reason)
 
     def _log_tool_call(self, tool_name: str, inputs: dict, output: object, call_start: float) -> None:
         if self._logger is None:

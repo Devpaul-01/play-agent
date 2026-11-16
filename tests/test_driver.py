@@ -18,11 +18,16 @@ import pytest
 
 from play_agent.observability.logging import RunLogger
 from play_agent.orchestrator.driver import Driver
-from play_agent.orchestrator.groq_diagnoser import DiagnosisResult, TokenUsage
+from play_agent.orchestrator.groq_diagnoser import DiagnoserError, DiagnosisResult, TokenUsage
 from play_agent.orchestrator.states import Candidate, Phase
 from play_agent.store.models import FinalState, VerificationOutcome
 from play_agent.store.store import Store
-from play_agent.tools.contracts import FailureEvidence, PatchApplyResult, VerificationResult
+from play_agent.tools.contracts import (
+    FailureEvidence,
+    PatchApplyResult,
+    ToolError,
+    VerificationResult,
+)
 
 
 @dataclass
@@ -352,3 +357,118 @@ def test_driver_without_logger_does_not_raise(store: Store, test_file):
     result = driver.run(str(test_file), "completes checkout")
 
     assert result.final_phase == Phase.SUCCEEDED
+
+
+# -- expected failures end the run cleanly instead of leaving it dangling ----
+
+
+def _one_candidate_diagnoser() -> FakeDiagnoser:
+    return FakeDiagnoser(
+        first_call_candidates=(Candidate(rank=1, locator_call_id="L3C9", reasoning="stale"),),
+        re_diagnosis_candidates=(),
+        proposed_exprs={"L3C9": 'page.getByTestId("new")'},
+    )
+
+
+def test_tool_error_ends_run_as_failed_with_reason_persisted(store: Store, test_file):
+    class MissingReportToolBelt(FakeToolBelt):
+        def collect_failure_evidence(self, test_file_path, test_title):
+            raise ToolError("no Playwright report found at /x/results.json")
+
+    tools = MissingReportToolBelt(
+        evidence=make_evidence(str(test_file)), apply_results=[], verification_results=[]
+    )
+
+    result = Driver(store=store, tools=tools, diagnoser=_one_candidate_diagnoser()).run(
+        str(test_file), "completes checkout"
+    )
+
+    assert result.final_phase == Phase.FAILED
+    assert "ToolError" in result.rejection_reason
+    assert "no Playwright report found" in result.rejection_reason
+
+    run = store.get_run(result.run_id)
+    assert run.final_state == FinalState.FAILED
+    assert "no Playwright report found" in run.rejection_reason
+
+
+def test_diagnoser_error_ends_run_as_failed_with_reason_persisted(store: Store, test_file):
+    class BrokenDiagnoser(FakeDiagnoser):
+        def diagnose_with_usage(self, evidence, test_source, is_re_diagnosis):
+            raise DiagnoserError("model returned no tool call")
+
+    diagnoser = BrokenDiagnoser(
+        first_call_candidates=(), re_diagnosis_candidates=(), proposed_exprs={}
+    )
+    tools = FakeToolBelt(
+        evidence=make_evidence(str(test_file)), apply_results=[], verification_results=[]
+    )
+
+    result = Driver(store=store, tools=tools, diagnoser=diagnoser).run(
+        str(test_file), "completes checkout"
+    )
+
+    assert result.final_phase == Phase.FAILED
+    assert "DiagnoserError" in result.rejection_reason
+    assert store.get_run(result.run_id).final_state == FinalState.FAILED
+
+
+def test_failure_is_distinct_from_semantic_rejection(store: Store, test_file):
+    # REJECTED means "diagnosed as not locator-repairable"; an infra
+    # failure must not be reported as that.
+    class BrokenDiagnoser(FakeDiagnoser):
+        def diagnose_with_usage(self, evidence, test_source, is_re_diagnosis):
+            raise DiagnoserError("boom")
+
+    tools = FakeToolBelt(
+        evidence=make_evidence(str(test_file)), apply_results=[], verification_results=[]
+    )
+    diagnoser = BrokenDiagnoser(
+        first_call_candidates=(), re_diagnosis_candidates=(), proposed_exprs={}
+    )
+
+    result = Driver(store=store, tools=tools, diagnoser=diagnoser).run(str(test_file), "t")
+
+    assert result.final_phase != Phase.REJECTED
+
+
+def test_unexpected_exception_finalizes_run_row_then_reraises(store: Store, test_file):
+    class BuggyToolBelt(FakeToolBelt):
+        def collect_failure_evidence(self, test_file_path, test_title):
+            raise ZeroDivisionError("a genuine bug")
+
+    tools = BuggyToolBelt(
+        evidence=make_evidence(str(test_file)), apply_results=[], verification_results=[]
+    )
+    driver = Driver(store=store, tools=tools, diagnoser=_one_candidate_diagnoser())
+
+    with pytest.raises(ZeroDivisionError):
+        driver.run(str(test_file), "completes checkout")
+
+    # The bug still propagates, but the run row was not left dangling.
+    runs = store.list_runs()
+    assert len(runs) == 1
+    assert runs[0].final_state == FinalState.FAILED
+    assert "ZeroDivisionError" in runs[0].rejection_reason
+
+
+def test_failed_run_is_logged_as_completed(store: Store, test_file, tmp_path):
+    import json
+
+    class MissingReportToolBelt(FakeToolBelt):
+        def collect_failure_evidence(self, test_file_path, test_title):
+            raise ToolError("no report")
+
+    tools = MissingReportToolBelt(
+        evidence=make_evidence(str(test_file)), apply_results=[], verification_results=[]
+    )
+    log_path = tmp_path / "run.log"
+
+    with RunLogger.to_file("pending", log_path) as logger:
+        Driver(store=store, tools=tools, diagnoser=_one_candidate_diagnoser(), logger=logger).run(
+            str(test_file), "completes checkout"
+        )
+
+    lines = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+    assert lines[-1]["event"] == "run_completed"
+    assert lines[-1]["final_phase"] == "failed"

@@ -309,3 +309,90 @@ def test_repair_prompt_omits_component_source_section_when_absent():
 
     prompt = client.captured_calls[0]["messages"][0]["content"]
     assert "Relevant component source" not in prompt
+
+
+# -- provider-layer failures (Sec12) -----------------------------------------
+
+
+class _RaisingClient:
+    """A client whose completions.create always raises exc -- stands in
+    for the provider failing after the SDK has exhausted its retries."""
+
+    def __init__(self, exc: Exception) -> None:
+        import types
+
+        def create(**_kwargs):
+            raise exc
+
+        self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
+
+
+def _groq_connection_error():
+    import groq
+    import httpx
+
+    return groq.APIConnectionError(request=httpx.Request("POST", "https://api.groq.com/x"))
+
+
+def _groq_rate_limit_error():
+    import groq
+    import httpx
+
+    request = httpx.Request("POST", "https://api.groq.com/x")
+    return groq.RateLimitError(
+        "rate limited", response=httpx.Response(429, request=request), body=None
+    )
+
+
+def test_diagnose_converts_provider_failure_to_diagnoser_error():
+    diagnoser = GroqDiagnoser(api_key="x", model="m", client=_RaisingClient(_groq_connection_error()))
+
+    with pytest.raises(DiagnoserError, match="provider request failed"):
+        diagnoser.diagnose_with_usage(make_evidence(), test_source="...", is_re_diagnosis=False)
+
+
+def test_propose_repair_converts_rate_limit_to_diagnoser_error():
+    diagnoser = GroqDiagnoser(api_key="x", model="m", client=_RaisingClient(_groq_rate_limit_error()))
+    candidate = Candidate(rank=1, locator_call_id="L1C1", reasoning="stale")
+
+    with pytest.raises(DiagnoserError, match="RateLimitError"):
+        diagnoser.propose_repair(make_evidence(), candidate)
+
+
+def test_provider_failure_preserves_original_exception_as_cause():
+    original = _groq_connection_error()
+    diagnoser = GroqDiagnoser(api_key="x", model="m", client=_RaisingClient(original))
+
+    with pytest.raises(DiagnoserError) as excinfo:
+        diagnoser.diagnose_with_usage(make_evidence(), test_source="...", is_re_diagnosis=False)
+
+    assert excinfo.value.__cause__ is original
+
+
+def test_non_provider_exceptions_are_not_swallowed():
+    # Only groq.APIError is a provider failure. A bug (here, a TypeError)
+    # must not be dressed up as one.
+    diagnoser = GroqDiagnoser(api_key="x", model="m", client=_RaisingClient(TypeError("a bug")))
+
+    with pytest.raises(TypeError):
+        diagnoser.diagnose_with_usage(make_evidence(), test_source="...", is_re_diagnosis=False)
+
+
+def test_real_client_is_built_with_explicit_retry_and_timeout_policy():
+    diagnoser = GroqDiagnoser(api_key="not-a-real-key", model="m")
+
+    assert diagnoser._client.max_retries == 3
+    assert diagnoser._client.timeout == 30.0
+
+
+def test_candidate_missing_required_field_is_a_diagnoser_error_not_a_keyerror():
+    response = make_tool_call_response(
+        "report_diagnosis",
+        {"repairable": True, "candidates": [{"reasoning": "no locator_call_id given"}]},
+    )
+    diagnoser = GroqDiagnoser(
+        api_key="unused", model="test-model", client=FakeGroqClient(responses=[response])
+    )
+
+    with pytest.raises(DiagnoserError, match="malformed candidate"):
+        diagnoser.diagnose_with_usage(make_evidence(), test_source="...", is_re_diagnosis=False)

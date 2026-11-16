@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from groq import Groq
+from groq import APIError, Groq
 from groq.types.chat import ChatCompletionToolParam
 
 from play_agent.orchestrator.states import Candidate
@@ -139,6 +139,18 @@ _PROPOSE_REPAIR_TOOL: ChatCompletionToolParam = {
 }
 
 
+# Sec12: transient failures (timeout, 5xx, rate limit, dropped connection)
+# are retried at the PROVIDER layer, 2-3 attempts with exponential backoff,
+# and never conflated with the orchestrator's semantic retry policy (Sec6:
+# candidate / re-diagnosis). The Groq SDK performs that retry itself --
+# honouring Retry-After, backing off exponentially, retrying only 408, 409,
+# 429, >=500 and connection errors -- so this module configures it
+# explicitly instead of relying on an implicit default, and converts the
+# eventual failure into a DiagnoserError the Driver knows how to handle.
+_PROVIDER_MAX_RETRIES = 3
+_PROVIDER_TIMEOUT_SECONDS = 30.0
+
+
 class GroqDiagnoser:
     """Diagnoser Protocol implementation backed by Groq's chat completions
     API. See driver.py's Diagnoser Protocol for the interface contract.
@@ -146,7 +158,23 @@ class GroqDiagnoser:
 
     def __init__(self, api_key: str, model: str, client: Groq | None = None) -> None:
         self._model = model
-        self._client = client or Groq(api_key=api_key)
+        self._client = client or Groq(
+            api_key=api_key,
+            max_retries=_PROVIDER_MAX_RETRIES,
+            timeout=_PROVIDER_TIMEOUT_SECONDS,
+        )
+
+    def _create_completion(self, **kwargs):
+        """The one place a provider call is made, so every transient
+        failure that outlasts the SDK's retries surfaces the same way."""
+
+        try:
+            return self._client.chat.completions.create(**kwargs)
+        except APIError as e:
+            raise DiagnoserError(
+                f"provider request failed after {_PROVIDER_MAX_RETRIES} retries "
+                f"({type(e).__name__}): {e}"
+            ) from e
 
     def diagnose_with_usage(
         self,
@@ -156,7 +184,7 @@ class GroqDiagnoser:
     ) -> DiagnosisResult:
         prompt = _build_diagnosis_prompt(evidence, test_source, is_re_diagnosis)
 
-        response = self._client.chat.completions.create(
+        response = self._create_completion(
             model=self._model,
             messages=[{"role": "user", "content": prompt}],
             tools=[_DIAGNOSE_TOOL],
@@ -170,14 +198,20 @@ class GroqDiagnoser:
             return DiagnosisResult(candidates=(), usage=usage)
 
         raw_candidates = args.get("candidates", [])
-        candidates = tuple(
-            Candidate(
-                rank=i + 1,
-                locator_call_id=c["locator_call_id"],
-                reasoning=c["reasoning"],
+        try:
+            candidates = tuple(
+                Candidate(
+                    rank=i + 1,
+                    locator_call_id=c["locator_call_id"],
+                    reasoning=c["reasoning"],
+                )
+                for i, c in enumerate(raw_candidates)
             )
-            for i, c in enumerate(raw_candidates)
-        )
+        except (KeyError, TypeError) as e:
+            # A candidate missing a required field is a malformed model
+            # response, not a bug here -- report it as one rather than
+            # leaking a bare KeyError.
+            raise DiagnoserError(f"malformed candidate in diagnosis response: {e!r}") from e
         return DiagnosisResult(candidates=candidates, usage=usage)
 
     def diagnose(
@@ -195,7 +229,7 @@ class GroqDiagnoser:
     def propose_repair(self, evidence: FailureEvidence, candidate: Candidate) -> str:
         prompt = _build_repair_prompt(evidence, candidate)
 
-        response = self._client.chat.completions.create(
+        response = self._create_completion(
             model=self._model,
             messages=[{"role": "user", "content": prompt}],
             tools=[_PROPOSE_REPAIR_TOOL],

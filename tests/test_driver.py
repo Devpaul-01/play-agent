@@ -472,3 +472,77 @@ def test_failed_run_is_logged_as_completed(store: Store, test_file, tmp_path):
     lines = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
     assert lines[-1]["event"] == "run_completed"
     assert lines[-1]["final_phase"] == "failed"
+
+
+# -- the verified patch's diff is the deliverable (Sec2/Sec19) ---------------
+
+
+def test_successful_run_carries_the_verified_diff_and_expression(store: Store, test_file):
+    tools = FakeToolBelt(
+        evidence=make_evidence(str(test_file)),
+        apply_results=[PatchApplyResult(applied=True, reason=None, diff="DIFF-1")],
+        verification_results=[VerificationResult(outcome="pass", reps_run=3, logs="ok")],
+    )
+    diagnoser = FakeDiagnoser(
+        first_call_candidates=(Candidate(rank=1, locator_call_id="L1C1", reasoning="x"),),
+        re_diagnosis_candidates=(),
+        proposed_exprs={"L1C1": 'page.getByTestId("x")'},
+    )
+
+    result = Driver(store=store, tools=tools, diagnoser=diagnoser).run(str(test_file), "t")
+
+    assert result.final_phase == Phase.SUCCEEDED
+    assert result.diff == "DIFF-1"
+    assert result.applied_expression == 'page.getByTestId("x")'
+
+
+def test_diff_comes_from_the_candidate_that_passed_not_an_earlier_failed_one(
+    store: Store, test_file
+):
+    tools = FakeToolBelt(
+        evidence=make_evidence(str(test_file)),
+        apply_results=[
+            PatchApplyResult(applied=True, reason=None, diff="DIFF-FIRST-WRONG"),
+            PatchApplyResult(applied=True, reason=None, diff="DIFF-SECOND-RIGHT"),
+        ],
+        verification_results=[
+            VerificationResult(outcome="fail", reps_run=3, logs="no"),
+            VerificationResult(outcome="pass", reps_run=3, logs="yes"),
+        ],
+    )
+    diagnoser = FakeDiagnoser(
+        first_call_candidates=(
+            Candidate(rank=1, locator_call_id="L1C1", reasoning="a"),
+            Candidate(rank=2, locator_call_id="L2C1", reasoning="b"),
+        ),
+        re_diagnosis_candidates=(),
+        proposed_exprs={
+            "L1C1": 'page.getByTestId("wrong")',
+            "L2C1": 'page.getByRole("button")',
+        },
+    )
+
+    result = Driver(store=store, tools=tools, diagnoser=diagnoser).run(str(test_file), "t")
+
+    assert result.final_phase == Phase.SUCCEEDED
+    assert result.diff == "DIFF-SECOND-RIGHT"
+    assert result.applied_expression == 'page.getByRole("button")'
+
+
+def test_unsuccessful_run_has_no_diff(store: Store, test_file):
+    tools = FakeToolBelt(
+        evidence=make_evidence(str(test_file)),
+        apply_results=[PatchApplyResult(applied=True, reason=None, diff="DIFF-1")],
+        verification_results=[VerificationResult(outcome="fail", reps_run=3, logs="no")],
+    )
+    diagnoser = FakeDiagnoser(
+        first_call_candidates=(Candidate(rank=1, locator_call_id="L1C1", reasoning="x"),),
+        re_diagnosis_candidates=(),
+        proposed_exprs={"L1C1": 'page.getByTestId("x")'},
+    )
+
+    result = Driver(store=store, tools=tools, diagnoser=diagnoser).run(str(test_file), "t")
+
+    assert result.final_phase != Phase.SUCCEEDED
+    assert result.diff is None
+    assert result.applied_expression is None

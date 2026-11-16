@@ -91,6 +91,11 @@ class DriverResult:
     final_phase: Phase
     rejection_reason: str | None
     attempts_made: int
+    # Set only when the run SUCCEEDED: the diff of the verified patch and the
+    # locator expression it installed. The deliverable (Sec2/Sec19) -- the
+    # real test file is never modified.
+    diff: str | None = None
+    applied_expression: str | None = None
 
 
 class Driver:
@@ -117,9 +122,14 @@ class Driver:
         # value, so every existing caller/test that never passed a
         # logger keeps working unchanged.
         self._logger = logger
+        # (diff, expression) of the most recently applied patch. Candidates
+        # are tried one at a time, so when a run SUCCEEDS the last applied
+        # patch is the one that was verified.
+        self._last_applied: tuple[str | None, str | None] | None = None
 
     def run(self, test_file_path: str, test_title: str) -> DriverResult:
         run_id = str(uuid.uuid4())
+        self._last_applied = None
         test_identifier = f"{test_file_path}::{test_title}"
 
         if self._logger is not None:
@@ -164,11 +174,16 @@ class Driver:
                 state.phase.value, state.rejection_reason, attempts_made
             )
 
+        diff, expression = (
+            self._last_applied if state.phase == Phase.SUCCEEDED and self._last_applied else (None, None)
+        )
         return DriverResult(
             run_id=run_id,
             final_phase=state.phase,
             rejection_reason=state.rejection_reason,
             attempts_made=attempts_made,
+            diff=diff,
+            applied_expression=expression,
         )
 
     def _step(
@@ -244,6 +259,8 @@ class Driver:
                         response_summary={"reason": result.reason},
                         passed_validation=result.applied,
                     )
+                if result.applied:
+                    self._last_applied = (result.diff, candidate.new_locator_expr)
                 event = ProposalValidated(valid=result.applied, reason=result.reason)
                 return transition(state, event), attempts_made
 

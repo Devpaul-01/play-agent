@@ -85,6 +85,13 @@ class Sandbox:
     ) -> None:
         self._teardown()
 
+    @property
+    def app_url(self) -> str:
+        """The app under test's URL as the CONTAINER must reach it (a
+        localhost host is rewritten to the Docker host gateway)."""
+
+        return self._resolve_app_url()
+
     def _resolve_app_url(self) -> str:
         host = self._config.app_host
         if host in ("localhost", "127.0.0.1", "0.0.0.0"):

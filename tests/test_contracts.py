@@ -11,6 +11,10 @@ do nothing, so a future caller can't mistake "not wired yet" for success.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -262,7 +266,7 @@ def test_probe_live_dom_without_sandbox_raises_tool_error():
         probe_live_dom("http://localhost:5173", 'getByTestId("x")', replay_actions=[])
 
 
-def test_probe_live_dom_passes_app_url_selector_and_actions_to_script():
+def test_probe_live_dom_sends_the_script_source_and_input_not_a_path():
     sandbox = FakeSandbox([(0, '{"resolved": true, "matchedCount": 1, "isVisible": true}')])
     actions = [{"type": "goto", "url": "/cart"}]
 
@@ -271,12 +275,92 @@ def test_probe_live_dom_passes_app_url_selector_and_actions_to_script():
     )
 
     command = sandbox.commands[0]
-    assert command[0] == "node"
-    assert command[1] == "/app/scripts/probe_dom.js"
-    probe_input = json.loads(command[2])
+    assert command[:2] == ["node", "-e"]
+    # The sandbox mounts only the app and an output dir, so a path into this
+    # repo would not exist in the container: the source itself is sent.
+    assert "chromium" in command[2]
+    assert not any("/app/scripts" in part for part in command[:3])
+    probe_input = json.loads(command[3])
     assert probe_input["appUrl"] == "http://localhost:5173"
-    assert probe_input["candidateSelector"] == 'page.getByTestId("x")'
+    assert probe_input["candidateExpression"] == 'page.getByTestId("x")'
     assert probe_input["replayActions"] == actions
+
+
+def test_probe_live_dom_refuses_a_non_allowlisted_candidate_without_calling_the_sandbox():
+    sandbox = FakeSandbox([])
+
+    with pytest.raises(ToolError, match="not an allowlisted locator expression"):
+        probe_live_dom(
+            "http://localhost:5173",
+            'page.evaluate(() => fetch("http://evil.example"))',
+            replay_actions=[],
+            sandbox=sandbox,
+        )
+
+    assert sandbox.commands == []  # nothing un-validated is ever sent to be evaluated
+
+
+def test_probe_live_dom_refuses_a_candidate_with_a_non_literal_argument():
+    sandbox = FakeSandbox([])
+
+    with pytest.raises(ToolError, match="not an allowlisted"):
+        probe_live_dom(
+            "http://localhost:5173",
+            "page.getByTestId(`${process.env.SECRET}`)",
+            replay_actions=[],
+            sandbox=sandbox,
+        )
+
+    assert sandbox.commands == []
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_real_probe_script_runs_under_node_against_a_fake_playwright(tmp_path):
+    # Runs the actual probe_dom.js (via `node -e`, exactly as delivered) with
+    # a stand-in `playwright` module, to prove argv handling, expression
+    # evaluation and the JSON contract work without needing a browser.
+    fake = tmp_path / "node_modules" / "playwright"
+    fake.mkdir(parents=True)
+    (fake / "index.js").write_text(
+        """
+        const locatorFor = (n) => ({
+          count: async () => n,
+          first: () => ({ isVisible: async () => true }),
+        });
+        const page = {
+          goto: async () => {},
+          getByTestId: (id) => locatorFor(id === "present" ? 1 : id === "dup" ? 3 : 0),
+        };
+        exports.chromium = {
+          launch: async () => ({
+            newContext: async () => ({ newPage: async () => page }),
+            close: async () => {},
+          }),
+        };
+        """
+    )
+    script = Path(probe_dom_path()).read_text()
+
+    def run(expression):
+        payload = json.dumps(
+            {"appUrl": "http://x", "candidateExpression": expression, "replayActions": []}
+        )
+        out = subprocess.run(
+            ["node", "-e", script, payload],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "NODE_PATH": str(tmp_path / "node_modules")},
+            check=True,
+        )
+        return json.loads(out.stdout.strip().splitlines()[-1])
+
+    assert run('page.getByTestId("present")') == {
+        "resolved": True,
+        "matchedCount": 1,
+        "isVisible": True,
+    }
+    assert run('page.getByTestId("absent")')["resolved"] is False
+    assert run('page.getByTestId("dup")')["matchedCount"] == 3
 
 
 def test_probe_live_dom_resolved_unique_visible():
@@ -403,3 +487,9 @@ def test_run_verification_escapes_regex_metacharacters_in_title(sample_test_file
 
     grep_arg = sandbox.commands[0][sandbox.commands[0].index("--grep") + 1]
     assert grep_arg == "handles\\ \\$100\\ total"
+
+
+def probe_dom_path():
+    from play_agent.tools import contracts
+
+    return contracts._PROBE_SCRIPT_PATH

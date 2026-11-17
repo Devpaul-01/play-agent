@@ -178,13 +178,15 @@ def _find_attachment_path(attachments: list[dict], name_prefix: str) -> str | No
 
 def probe_live_dom(
     app_url: str,
-    candidate_selector: str,
+    candidate_expression: str,
     replay_actions: list[dict],
     sandbox: SandboxExecutor | None = None,
 ) -> DomProbeResult:
     """Relaunch an isolated browser context inside the sandbox, replay
     recorded actions up to the failure point, then check whether
-    `candidate_selector` resolves to a unique, visible element (Sec7).
+    `candidate_expression` resolves to a unique, visible element (Sec7).
+    candidate_expression is a Playwright locator expression such as
+    `page.getByTestId("x")`, not a CSS selector.
 
     Requires the app-under-test's state to be disposable per run (Sec2) --
     see the fixture app spec's statelessness rule; this function has no
@@ -197,24 +199,40 @@ def probe_live_dom(
     Node/Playwright script executed via sandbox.exec_run (Sec10's
     network-restricted container), not in this process -- this process
     never gets a direct browser handle, matching Sec7's "only orchestrator-
-    mediated tool access" boundary. The script is handed its input as a
-    single JSON argument and must print exactly one JSON object to
-    stdout; this keeps the probe's internals swappable (e.g. a different
-    script path, a different browser) without changing this function's
-    signature.
+    mediated tool access" boundary.
+
+    The script (probe_dom.js, shipped inside this package) is delivered as
+    `node -e <source> <json>` rather than by path: the sandbox mounts only
+    the app under test and an output directory, so a path into this
+    repository would not exist in the container. It prints exactly one JSON
+    object as its last stdout line.
+
+    The script evaluates candidate_expression against the live page, so the
+    expression is validated here first, with the same allowlist and
+    literal-only-argument rules apply_patch enforces, and refused if it
+    does not pass. Nothing un-validated is ever sent to be evaluated.
     """
 
     if sandbox is None:
         raise ToolError("probe_live_dom requires a sandbox (Sec10); none was provided")
 
+    from play_agent.tools.patch_validation import validate_new_locator_expression
+
+    check = validate_new_locator_expression(candidate_expression)
+    if not check.valid:
+        raise ToolError(
+            "probe_live_dom refuses a candidate that is not an allowlisted locator "
+            f"expression: {check.reason}"
+        )
+
     probe_input = {
         "appUrl": app_url,
-        "candidateSelector": candidate_selector,
+        "candidateExpression": candidate_expression,
         "replayActions": replay_actions,
     }
 
     exit_code, output = sandbox.exec_run(
-        ["node", "/app/scripts/probe_dom.js", json.dumps(probe_input)]
+        ["node", "-e", _load_probe_script(), json.dumps(probe_input)]
     )
 
     if exit_code != 0:
@@ -226,12 +244,22 @@ def probe_live_dom(
         raise ToolError(f"probe_live_dom script produced unparseable output: {output}") from e
 
     return DomProbeResult(
-        candidate_selector=candidate_selector,
+        candidate_selector=candidate_expression,
         resolved=probe_output["resolved"],
         matched_count=probe_output["matchedCount"],
         is_visible=probe_output["isVisible"],
         is_unique=probe_output["matchedCount"] == 1,
     )
+
+
+_PROBE_SCRIPT_PATH = Path(__file__).with_name("probe_dom.js")
+
+
+def _load_probe_script() -> str:
+    try:
+        return _PROBE_SCRIPT_PATH.read_text()
+    except OSError as e:
+        raise ToolError(f"probe script is missing from the package: {e}") from e
 
 
 def _last_json_line(output: str) -> str:

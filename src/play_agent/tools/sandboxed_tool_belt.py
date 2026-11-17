@@ -23,12 +23,14 @@ from typing import Self
 from play_agent.sandbox.container import Sandbox, SandboxConfig, SandboxError
 from play_agent.tools.component_source import resolve_component_source
 from play_agent.tools.contracts import (
+    DomProbeResult,
     FailureEvidence,
     PatchApplyResult,
     ToolError,
     VerificationResult,
     apply_patch,
     collect_failure_evidence,
+    probe_live_dom,
     run_verification,
 )
 from play_agent.tools.patch_validation import find_locator_calls
@@ -231,3 +233,29 @@ class SandboxedToolBelt:
             )
         except SandboxError as e:
             raise ToolError(f"sandbox failure during verification: {e}") from e
+
+    def probe_live_dom(
+        self, candidate_expression: str, replay_actions: list[dict] | None = None
+    ) -> DomProbeResult:
+        """Check a candidate locator against the live app in the sandbox.
+
+        The URL is the one the CONTAINER must use to reach the app, not the
+        host-side one. With no replay_actions the probe sees only the app's
+        landing page, so a negative result for an element on a deeper page
+        is not evidence the locator is wrong.
+        """
+
+        if self._sandbox is None:
+            raise RuntimeError(
+                "SandboxedToolBelt.probe_live_dom used outside its 'with' block -- "
+                "the sandbox isn't running."
+            )
+        try:
+            return probe_live_dom(
+                self._sandbox.app_url,
+                candidate_expression,
+                replay_actions or [],
+                sandbox=self._sandbox,
+            )
+        except SandboxError as e:
+            raise ToolError(f"sandbox failure during DOM probe: {e}") from e

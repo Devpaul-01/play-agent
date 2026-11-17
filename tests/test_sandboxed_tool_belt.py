@@ -471,3 +471,43 @@ def test_collect_failure_evidence_unresolvable_locator_leaves_context_none(
     evidence = belt.collect_failure_evidence(str(test_file), "t")
 
     assert evidence.component_source_context is None
+
+
+# -- probe_live_dom (Sec7) ---------------------------------------------------
+
+
+def test_probe_outside_with_block_raises(sandbox_config):
+    with pytest.raises(RuntimeError, match="outside its 'with' block"):
+        _belt(sandbox_config).probe_live_dom('page.getByTestId("x")')
+
+
+def test_probe_uses_the_container_facing_app_url(sandbox_config, mock_docker_container):
+    mock_docker_container.exec_run.return_value = MagicMock(
+        exit_code=0, output=b'{"resolved": true, "matchedCount": 1, "isVisible": true}'
+    )
+
+    with _patched_client(mock_docker_container), _belt(sandbox_config) as belt:
+        result = belt.probe_live_dom('page.getByTestId("x")')
+
+    command = mock_docker_container.exec_run.call_args.args[0]
+    probe_input = json.loads(command[3])
+    # localhost is rewritten to the Docker host gateway: "localhost" inside
+    # the container is the container itself, not the app.
+    assert probe_input["appUrl"] == "http://host.docker.internal:5173"
+    assert result.resolved is True and result.is_unique is True
+
+
+def test_probe_sandbox_failure_becomes_a_tool_error(sandbox_config, mock_docker_container):
+    from play_agent.sandbox.container import SandboxError
+    from play_agent.tools.contracts import ToolError
+
+    with (
+        _patched_client(mock_docker_container),
+        _belt(sandbox_config) as belt,
+        patch(
+            "play_agent.tools.sandboxed_tool_belt.probe_live_dom",
+            side_effect=SandboxError("exec timed out"),
+        ),
+        pytest.raises(ToolError, match="sandbox failure during DOM probe"),
+    ):
+        belt.probe_live_dom('page.getByTestId("x")')

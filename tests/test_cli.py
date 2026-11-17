@@ -319,3 +319,24 @@ def test_output_dir_defaults_to_the_config_value(
     )
 
     assert (configured / "abc123" / "repair.diff").exists()
+
+
+@patch("play_agent.cli.main.Driver")
+@patch("play_agent.cli.main.SandboxedToolBelt")
+@patch("play_agent.cli.main.GroqDiagnoser")
+@patch("play_agent.cli.main.Store")
+def test_probe_dom_flag_is_passed_to_the_driver(
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path
+):
+    mock_belt_cls.return_value.__enter__.return_value = MagicMock()
+    mock_driver_cls.return_value.run.return_value = _succeeded_with_diff()
+
+    runner.invoke(
+        cli,
+        ["repair", str(spec_file), "t", "--log-path", log_path, "--probe-dom"],
+        env=REQUIRED_ENV,
+    )
+    assert mock_driver_cls.call_args.kwargs["probe_candidates"] is True
+
+    runner.invoke(cli, ["repair", str(spec_file), "t", "--log-path", log_path], env=REQUIRED_ENV)
+    assert mock_driver_cls.call_args.kwargs["probe_candidates"] is False

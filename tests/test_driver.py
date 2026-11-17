@@ -546,3 +546,124 @@ def test_unsuccessful_run_has_no_diff(store: Store, test_file):
     assert result.final_phase != Phase.SUCCEEDED
     assert result.diff is None
     assert result.applied_expression is None
+
+
+# -- advisory live-DOM probing --------------------------------------------------
+
+
+class _ProbingToolBelt(FakeToolBelt):
+    def __init__(self, *args, probe_result=None, probe_error=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.probed: list[str] = []
+        self._probe_result = probe_result
+        self._probe_error = probe_error
+
+    def probe_live_dom(self, candidate_expression, replay_actions=None):
+        self.probed.append(candidate_expression)
+        if self._probe_error is not None:
+            raise self._probe_error
+        return self._probe_result
+
+
+def _probe_setup(test_file, **kwargs):
+    tools = _ProbingToolBelt(
+        evidence=make_evidence(str(test_file)),
+        apply_results=[PatchApplyResult(applied=True, reason=None, diff="D")],
+        verification_results=[VerificationResult(outcome="pass", reps_run=3, logs="ok")],
+        **kwargs,
+    )
+    diagnoser = FakeDiagnoser(
+        first_call_candidates=(Candidate(rank=1, locator_call_id="L1C1", reasoning="x"),),
+        re_diagnosis_candidates=(),
+        proposed_exprs={"L1C1": 'page.getByTestId("x")'},
+    )
+    return tools, diagnoser
+
+
+def _log_events(log_path):
+    import json
+
+    return [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+
+
+def test_probe_is_off_by_default(store: Store, test_file, tmp_path):
+    tools, diagnoser = _probe_setup(test_file)
+
+    with RunLogger.to_file("pending", tmp_path / "run.log") as logger:
+        Driver(store=store, tools=tools, diagnoser=diagnoser, logger=logger).run(str(test_file), "t")
+
+    assert tools.probed == []
+
+
+def test_probe_runs_on_the_proposed_expression_and_is_logged_when_enabled(
+    store: Store, test_file, tmp_path
+):
+    from play_agent.tools.contracts import DomProbeResult
+
+    result = DomProbeResult(
+        candidate_selector='page.getByTestId("x")',
+        resolved=True,
+        matched_count=1,
+        is_visible=True,
+        is_unique=True,
+    )
+    tools, diagnoser = _probe_setup(test_file, probe_result=result)
+    log_path = tmp_path / "run.log"
+
+    with RunLogger.to_file("pending", log_path) as logger:
+        Driver(
+            store=store, tools=tools, diagnoser=diagnoser, logger=logger, probe_candidates=True
+        ).run(str(test_file), "t")
+
+    assert tools.probed == ['page.getByTestId("x")']
+    probe_events = [
+        e for e in _log_events(log_path) if e["event"] == "tool_call" and e["tool"] == "probe_live_dom"
+    ]
+    assert len(probe_events) == 1
+    assert probe_events[0]["output"]["matched_count"] == 1
+
+
+def test_a_failing_probe_never_fails_the_run(store: Store, test_file, tmp_path):
+    from play_agent.tools.contracts import ToolError
+
+    tools, diagnoser = _probe_setup(test_file, probe_error=ToolError("browser would not start"))
+    log_path = tmp_path / "run.log"
+
+    with RunLogger.to_file("pending", log_path) as logger:
+        run = Driver(
+            store=store, tools=tools, diagnoser=diagnoser, logger=logger, probe_candidates=True
+        ).run(str(test_file), "t")
+
+    assert run.final_phase == Phase.SUCCEEDED  # advisory only
+    probe_events = [e for e in _log_events(log_path) if e.get("tool") == "probe_live_dom"]
+    assert "browser would not start" in probe_events[0]["output"]["error"]
+
+
+def test_probe_is_skipped_when_there_is_no_logger_to_record_it(store: Store, test_file):
+    tools, diagnoser = _probe_setup(test_file)
+
+    Driver(store=store, tools=tools, diagnoser=diagnoser, probe_candidates=True).run(
+        str(test_file), "t"
+    )
+
+    assert tools.probed == []  # a browser launch whose output nobody would see
+
+
+def test_probe_enabled_but_toolbelt_lacks_it_is_a_no_op(store: Store, test_file, tmp_path):
+    tools = FakeToolBelt(
+        evidence=make_evidence(str(test_file)),
+        apply_results=[PatchApplyResult(applied=True, reason=None, diff="D")],
+        verification_results=[VerificationResult(outcome="pass", reps_run=3, logs="ok")],
+    )
+    diagnoser = FakeDiagnoser(
+        first_call_candidates=(Candidate(rank=1, locator_call_id="L1C1", reasoning="x"),),
+        re_diagnosis_candidates=(),
+        proposed_exprs={"L1C1": 'page.getByTestId("x")'},
+    )
+
+    with RunLogger.to_file("pending", tmp_path / "run.log") as logger:
+        run = Driver(
+            store=store, tools=tools, diagnoser=diagnoser, logger=logger, probe_candidates=True
+        ).run(str(test_file), "t")
+
+    assert run.final_phase == Phase.SUCCEEDED

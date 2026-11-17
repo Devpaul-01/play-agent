@@ -51,12 +51,20 @@ def cli() -> None:
     help="Directory for the run's report.md and repair.diff (Sec19). Defaults to "
     "PLAY_AGENT_OUTPUT_DIR, or play-agent-output if that's unset too.",
 )
+@click.option(
+    "--probe-dom",
+    is_flag=True,
+    help="Advisory: also check each proposed locator against the live app in the "
+    "sandbox and record the result in the run log. It never changes the outcome. "
+    "No actions are replayed, so only the app's landing page is probed.",
+)
 def repair(
     test_file_path: str,
     test_title: str,
     reps: int,
     log_path: str | None,
     output_dir: str | None,
+    probe_dom: bool,
 ) -> None:
     """Attempt to repair a failing test's stale locator.
 
@@ -101,7 +109,13 @@ def repair(
                 component_src_root=config.component_src_root,
             )
         ) as tools:
-            driver = Driver(store=store, tools=tools, diagnoser=diagnoser, logger=logger)
+            driver = Driver(
+                store=store,
+                tools=tools,
+                diagnoser=diagnoser,
+                logger=logger,
+                probe_candidates=probe_dom,
+            )
             result = driver.run(test_file_path, test_title)
     except SandboxError as e:
         click.echo(f"Sandbox error: {e}", err=True)

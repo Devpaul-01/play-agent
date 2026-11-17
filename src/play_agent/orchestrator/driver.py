@@ -107,6 +107,7 @@ class Driver:
         tools: ToolBelt,
         diagnoser: Diagnoser,
         logger: RunLogger | None = None,
+        probe_candidates: bool = False,
     ) -> None:
         self._store = store
         self._tools = tools
@@ -122,6 +123,13 @@ class Driver:
         # value, so every existing caller/test that never passed a
         # logger keeps working unchanged.
         self._logger = logger
+        # Advisory live-DOM probing of each proposed locator (Sec7's
+        # probe_live_dom). Off by default: it launches a browser per
+        # candidate, and its only output is the run log. It never changes
+        # what the run does -- with no recorded actions to replay it can
+        # only see the app's landing page, so a negative result is not
+        # authoritative enough to reject a candidate on.
+        self._probe_candidates = probe_candidates
         # (diff, expression) of the most recently applied patch. Candidates
         # are tried one at a time, so when a run SUCCEEDS the last applied
         # patch is the one that was verified.
@@ -261,6 +269,8 @@ class Driver:
                     )
                 if result.applied:
                     self._last_applied = (result.diff, candidate.new_locator_expr)
+                    if self._probe_candidates:
+                        self._probe_candidate(candidate.new_locator_expr)
                 event = ProposalValidated(valid=result.applied, reason=result.reason)
                 return transition(state, event), attempts_made
 
@@ -284,6 +294,26 @@ class Driver:
 
             case _:
                 raise AssertionError(f"_step called with terminal phase {state.phase}")
+
+    def _probe_candidate(self, expression: str) -> None:
+        probe = getattr(self._tools, "probe_live_dom", None)
+        if probe is None or self._logger is None:
+            # No probe available, or nowhere to record the result: skip
+            # rather than launch a browser whose output nobody would see.
+            return
+
+        call_start = time.monotonic()
+        try:
+            outcome: object = probe(expression)
+        except ToolError as e:
+            # Advisory: a probe that cannot run must not fail the repair.
+            outcome = {"error": str(e)}
+        self._log_tool_call(
+            "probe_live_dom",
+            {"candidate_selector": expression, "replay_actions": []},
+            outcome,
+            call_start,
+        )
 
     @staticmethod
     def _fail_state(state: RunState, reason: str) -> RunState:

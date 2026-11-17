@@ -26,6 +26,13 @@ REQUIRED_ENV = {
 }
 
 
+@pytest.fixture(autouse=True)
+def isolated_cwd(tmp_path, monkeypatch):
+    # The CLI's default output directory is relative to the cwd; run every
+    # test from a scratch directory so none can write into the repo.
+    monkeypatch.chdir(tmp_path)
+
+
 @pytest.fixture
 def runner():
     return CliRunner()
@@ -205,3 +212,110 @@ def test_repair_writes_log_file_at_given_path(
     for line in content.splitlines():
         if line.strip():
             json.loads(line)  # must be valid JSON if anything was written
+
+
+DIFF = "--- a/tests/checkout.spec.ts\n+++ b/tests/checkout.spec.ts\n@@ -1 +1 @@\n-old\n+new\n"
+
+
+def _succeeded_with_diff():
+    return DriverResult(
+        run_id="abc123",
+        final_phase=Phase.SUCCEEDED,
+        rejection_reason=None,
+        attempts_made=1,
+        diff=DIFF,
+        applied_expression='page.getByRole("button")',
+    )
+
+
+@patch("play_agent.cli.main.Driver")
+@patch("play_agent.cli.main.SandboxedToolBelt")
+@patch("play_agent.cli.main.GroqDiagnoser")
+@patch("play_agent.cli.main.Store")
+def test_success_prints_the_diff_and_says_the_file_is_untouched(
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path
+):
+    mock_belt_cls.return_value.__enter__.return_value = MagicMock()
+    mock_driver_cls.return_value.run.return_value = _succeeded_with_diff()
+
+    result = runner.invoke(
+        cli,
+        ["repair", str(spec_file), "completes checkout", "--log-path", log_path],
+        env=REQUIRED_ENV,
+    )
+
+    assert result.exit_code == 0
+    assert "has NOT been modified" in result.output
+    assert "+new" in result.output  # the diff itself is shown
+    assert "git apply" in result.output
+    assert 'page.getByRole("button")' in result.output
+
+
+@patch("play_agent.cli.main.Driver")
+@patch("play_agent.cli.main.SandboxedToolBelt")
+@patch("play_agent.cli.main.GroqDiagnoser")
+@patch("play_agent.cli.main.Store")
+def test_success_writes_the_diff_file_and_report(
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path, tmp_path
+):
+    mock_belt_cls.return_value.__enter__.return_value = MagicMock()
+    mock_driver_cls.return_value.run.return_value = _succeeded_with_diff()
+    out = tmp_path / "out"
+
+    runner.invoke(
+        cli,
+        ["repair", str(spec_file), "completes checkout", "--log-path", log_path, "--output-dir", str(out)],
+        env=REQUIRED_ENV,
+    )
+
+    assert (out / "abc123" / "repair.diff").read_text() == DIFF
+    assert "# play-agent repair report" in (out / "abc123" / "report.md").read_text()
+
+
+@patch("play_agent.cli.main.Driver")
+@patch("play_agent.cli.main.SandboxedToolBelt")
+@patch("play_agent.cli.main.GroqDiagnoser")
+@patch("play_agent.cli.main.Store")
+def test_failed_run_writes_a_report_but_no_diff_and_prints_the_reason(
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path, tmp_path
+):
+    mock_belt_cls.return_value.__enter__.return_value = MagicMock()
+    mock_driver_cls.return_value.run.return_value = DriverResult(
+        run_id="abc123",
+        final_phase=Phase.FAILED,
+        rejection_reason="ToolError: no Playwright report found",
+        attempts_made=0,
+    )
+    out = tmp_path / "out"
+
+    result = runner.invoke(
+        cli,
+        ["repair", str(spec_file), "completes checkout", "--log-path", log_path, "--output-dir", str(out)],
+        env=REQUIRED_ENV,
+    )
+
+    assert result.exit_code == 1
+    assert "no Playwright report found" in result.output
+    assert "Your test file has not been modified" in result.output
+    assert (out / "abc123" / "report.md").exists()
+    assert not (out / "abc123" / "repair.diff").exists()
+
+
+@patch("play_agent.cli.main.Driver")
+@patch("play_agent.cli.main.SandboxedToolBelt")
+@patch("play_agent.cli.main.GroqDiagnoser")
+@patch("play_agent.cli.main.Store")
+def test_output_dir_defaults_to_the_config_value(
+    mock_store_cls, mock_diagnoser_cls, mock_belt_cls, mock_driver_cls, runner, spec_file, log_path, tmp_path
+):
+    mock_belt_cls.return_value.__enter__.return_value = MagicMock()
+    mock_driver_cls.return_value.run.return_value = _succeeded_with_diff()
+    configured = tmp_path / "configured-out"
+
+    runner.invoke(
+        cli,
+        ["repair", str(spec_file), "completes checkout", "--log-path", log_path],
+        env={**REQUIRED_ENV, "PLAY_AGENT_OUTPUT_DIR": str(configured)},
+    )
+
+    assert (configured / "abc123" / "repair.diff").exists()

@@ -29,6 +29,8 @@ class Config:
 
     db_path: str
     log_path: str
+    # Where each run's report.md / repair.diff are written (Sec19).
+    output_dir: str
     # M3/Sec11: the frontend's component source root, for
     # component-source evidence resolution. Optional -- a missing root
     # just means that evidence is omitted, not a config error, since
@@ -61,5 +63,6 @@ class Config:
             sandbox_image=os.environ.get("PLAY_AGENT_SANDBOX_IMAGE", "play-agent-sandbox:latest"),
             db_path=os.environ.get("PLAY_AGENT_DB_PATH", "play_agent.sqlite3"),
             log_path=os.environ.get("PLAY_AGENT_LOG_PATH", "play_agent.log"),
+            output_dir=os.environ.get("PLAY_AGENT_OUTPUT_DIR", "play-agent-output"),
             component_src_root=os.environ.get("PLAY_AGENT_COMPONENT_SRC_ROOT"),
         )

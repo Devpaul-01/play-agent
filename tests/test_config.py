@@ -50,6 +50,7 @@ def test_defaults_applied_when_optional_vars_absent(monkeypatch):
     assert config.sandbox_image == "play-agent-sandbox:latest"
     assert config.db_path == "play_agent.sqlite3"
     assert config.log_path == "play_agent.log"
+    assert config.output_dir == "play-agent-output"
     assert config.component_src_root is None
 
 
@@ -62,6 +63,7 @@ def test_all_vars_read_when_present(monkeypatch):
             "PLAY_AGENT_SANDBOX_IMAGE": "custom-image:v2",
             "PLAY_AGENT_DB_PATH": "/tmp/custom.sqlite3",
             "PLAY_AGENT_LOG_PATH": "/tmp/custom.log",
+            "PLAY_AGENT_OUTPUT_DIR": "/tmp/out",
             "PLAY_AGENT_COMPONENT_SRC_ROOT": "/tmp/fixture-app/frontend/src",
         },
     )
@@ -73,6 +75,7 @@ def test_all_vars_read_when_present(monkeypatch):
     assert config.sandbox_image == "custom-image:v2"
     assert config.db_path == "/tmp/custom.sqlite3"
     assert config.log_path == "/tmp/custom.log"
+    assert config.output_dir == "/tmp/out"
     assert config.component_src_root == "/tmp/fixture-app/frontend/src"
 
 

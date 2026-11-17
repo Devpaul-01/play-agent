@@ -19,6 +19,7 @@ from play_agent.observability.logging import RunLogger
 from play_agent.orchestrator.driver import Driver, DriverResult
 from play_agent.orchestrator.groq_diagnoser import GroqDiagnoser
 from play_agent.orchestrator.states import Phase
+from play_agent.report import RunArtifacts, write_run_artifacts
 from play_agent.sandbox.container import SandboxConfig, SandboxError
 from play_agent.store.store import Store
 from play_agent.tools.sandboxed_tool_belt import SandboxedToolBelt, SandboxedToolBeltConfig
@@ -44,7 +45,19 @@ def cli() -> None:
     help="Path to append structured JSON run logs to (Sec17). Defaults to "
     "PLAY_AGENT_LOG_PATH, or play_agent.log if that's unset too.",
 )
-def repair(test_file_path: str, test_title: str, reps: int, log_path: str | None) -> None:
+@click.option(
+    "--output-dir",
+    default=None,
+    help="Directory for the run's report.md and repair.diff (Sec19). Defaults to "
+    "PLAY_AGENT_OUTPUT_DIR, or play-agent-output if that's unset too.",
+)
+def repair(
+    test_file_path: str,
+    test_title: str,
+    reps: int,
+    log_path: str | None,
+    output_dir: str | None,
+) -> None:
     """Attempt to repair a failing test's stale locator.
 
     TEST_FILE_PATH is the path to the Playwright spec file containing
@@ -94,20 +107,32 @@ def repair(test_file_path: str, test_title: str, reps: int, log_path: str | None
         click.echo(f"Sandbox error: {e}", err=True)
         sys.exit(1)
 
-    _report_result(result)
+    attempts = list(store.list_attempts(result.run_id))
+    artifacts = write_run_artifacts(
+        output_dir or config.output_dir, result, attempts, test_file_path, test_title
+    )
+    _report_result(result, artifacts)
     sys.exit(0 if result.final_phase == Phase.SUCCEEDED else 1)
 
 
-def _report_result(result: DriverResult) -> None:
+def _report_result(result: DriverResult, artifacts: RunArtifacts) -> None:
     click.echo(f"Run {result.run_id}: {result.final_phase.value}")
     click.echo(f"Attempts made: {result.attempts_made}")
     if result.rejection_reason:
-        click.echo(f"Rejection reason: {result.rejection_reason}")
+        click.echo(f"Reason: {result.rejection_reason}")
 
-    if result.final_phase == Phase.SUCCEEDED:
-        click.echo("\nRepair succeeded. Review the diff before committing -- this tool never commits for you.")
+    if result.final_phase == Phase.SUCCEEDED and artifacts.diff_path is not None:
+        click.echo(f"\nVerified fix: {result.applied_expression}")
+        click.echo(
+            "Your test file has NOT been modified and nothing was committed. "
+            "Review the diff, then apply it from your app root:"
+        )
+        click.echo(f"  git apply {artifacts.diff_path.resolve()}\n")
+        click.echo(result.diff or "")
     else:
-        click.echo("\nNo repair was applied. See the rejection reason above, or re-run with more detail once logging (M5) lands.")
+        click.echo("\nNo repair was verified. Your test file has not been modified.")
+
+    click.echo(f"\nReport: {artifacts.report_path}")
 
 
 if __name__ == "__main__":

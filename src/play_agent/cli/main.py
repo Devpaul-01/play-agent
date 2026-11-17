@@ -14,6 +14,7 @@ import sys
 
 import click
 
+from play_agent.cli.evaluate import eval_group
 from play_agent.config import Config, ConfigError
 from play_agent.observability.logging import RunLogger
 from play_agent.orchestrator.driver import Driver, DriverResult
@@ -28,6 +29,9 @@ from play_agent.tools.sandboxed_tool_belt import SandboxedToolBelt, SandboxedToo
 @click.group()
 def cli() -> None:
     """play-agent: a self-healing locator repair agent for Playwright tests."""
+
+
+cli.add_command(eval_group)
 
 
 @cli.command()

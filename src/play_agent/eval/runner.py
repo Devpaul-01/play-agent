@@ -82,28 +82,57 @@ class ScenarioRunResult:
     error: str | None = None
 
 
-def run_comparison(
+@dataclass(frozen=True)
+class ComparisonReport:
+    """One configuration's metrics together with the per-scenario results
+    they were computed from, so scenarios that could not run are visible
+    rather than silently absent from the numbers."""
+
+    metrics: BenchmarkMetrics
+    scenario_results: tuple[ScenarioRunResult, ...]
+
+    @property
+    def errors(self) -> tuple[ScenarioRunResult, ...]:
+        return tuple(r for r in self.scenario_results if r.error is not None)
+
+
+def run_comparison_with_details(
     config: RunnerConfig, configurations: list[DiagnosisConfiguration], work_dir: str | Path
-) -> dict[str, BenchmarkMetrics]:
+) -> dict[str, ComparisonReport]:
     """Run every scenario in config.scenarios against every
-    configuration, and return {configuration_name: BenchmarkMetrics}.
+    configuration, and return {configuration_name: ComparisonReport}.
 
     Scenarios that error out (missing test_file/test_title, a mutation
     that fails to apply, a sandbox error) are recorded with error set
     and excluded from that configuration's metrics rather than crashing
     the whole comparison -- one bad scenario shouldn't block reporting
     on the rest, and Sec16's metrics are explicitly meant to be computed
-    from real runs, not estimated around a partial failure.
+    from real runs, not estimated around a partial failure. They stay
+    visible on the report so a caller can show them.
     """
 
-    results: dict[str, BenchmarkMetrics] = {}
+    reports: dict[str, ComparisonReport] = {}
 
     for configuration in configurations:
         scenario_results = run_scenarios_for_configuration(config, configuration, work_dir)
         outcomes = [r.outcome for r in scenario_results if r.outcome is not None]
-        results[configuration.name] = compute_metrics(outcomes)
+        reports[configuration.name] = ComparisonReport(
+            metrics=compute_metrics(outcomes), scenario_results=tuple(scenario_results)
+        )
 
-    return results
+    return reports
+
+
+def run_comparison(
+    config: RunnerConfig, configurations: list[DiagnosisConfiguration], work_dir: str | Path
+) -> dict[str, BenchmarkMetrics]:
+    """Metrics only; see run_comparison_with_details to also see which
+    scenarios could not run."""
+
+    return {
+        name: report.metrics
+        for name, report in run_comparison_with_details(config, configurations, work_dir).items()
+    }
 
 
 def run_scenarios_for_configuration(

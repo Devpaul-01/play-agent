@@ -210,3 +210,26 @@ def test_sandbox_error_recorded_as_scenario_error_not_raised(
     assert len(results) == 1
     assert results[0].outcome is None
     assert "sandbox error" in results[0].error
+
+
+def test_comparison_with_details_surfaces_scenarios_that_could_not_run(fixture_app_root, work_dir):
+    from play_agent.eval.runner import run_comparison_with_details
+
+    config = make_config(fixture_app_root, [NOT_RUNNABLE_MUTATION])
+    configs = [DiagnosisConfiguration(name="cfg-a", diagnoser_factory=MagicMock())]
+
+    reports = run_comparison_with_details(config, configs, work_dir)
+
+    report = reports["cfg-a"]
+    assert report.metrics.scenario_count == 0  # excluded from the numbers...
+    assert len(report.errors) == 1  # ...but not hidden
+    assert "not runnable" in report.errors[0].error
+
+
+def test_run_comparison_still_returns_plain_metrics(fixture_app_root, work_dir):
+    config = make_config(fixture_app_root, [NOT_RUNNABLE_MUTATION])
+    configs = [DiagnosisConfiguration(name="cfg-a", diagnoser_factory=MagicMock())]
+
+    results = run_comparison(config, configs, work_dir)
+
+    assert results["cfg-a"].scenario_count == 0

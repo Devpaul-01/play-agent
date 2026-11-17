@@ -289,7 +289,9 @@ class Driver:
                     call_start,
                 )
                 event = VerificationCompleted(outcome=result.outcome)
-                self._persist_attempt(state, result)
+                self._persist_attempt(
+                    state, result, int((time.monotonic() - call_start) * 1000)
+                )
                 return transition(state, event), attempts_made
 
             case _:
@@ -342,7 +344,9 @@ class Driver:
                 rejection_reason=state.rejection_reason,
             )
 
-    def _persist_attempt(self, state: RunState, result: VerificationResult) -> None:
+    def _persist_attempt(
+        self, state: RunState, result: VerificationResult, duration_ms: int
+    ) -> None:
         candidate = state.current_candidate
         assert candidate is not None
         usage = self._pending_usage
@@ -363,5 +367,5 @@ class Driver:
             attempt_id,
             verification_outcome=VerificationOutcome(result.outcome),
             verification_reps=result.reps_run,
-            state_duration_ms=0,
+            state_duration_ms=duration_ms,
         )

@@ -667,3 +667,31 @@ def test_probe_enabled_but_toolbelt_lacks_it_is_a_no_op(store: Store, test_file,
         ).run(str(test_file), "t")
 
     assert run.final_phase == Phase.SUCCEEDED
+
+
+def test_attempt_records_the_real_verification_duration(store: Store, test_file):
+    # state_duration_ms used to be hard-coded to 0, which made the latency
+    # metric always report 0.
+    import time
+
+    class SlowVerificationToolBelt(FakeToolBelt):
+        def run_verification(self, test_file_path, test_title, reps=3):
+            time.sleep(0.03)
+            return super().run_verification(test_file_path, test_title, reps)
+
+    tools = SlowVerificationToolBelt(
+        evidence=make_evidence(str(test_file)),
+        apply_results=[PatchApplyResult(applied=True, reason=None, diff="D")],
+        verification_results=[VerificationResult(outcome="pass", reps_run=3, logs="ok")],
+    )
+    diagnoser = FakeDiagnoser(
+        first_call_candidates=(Candidate(rank=1, locator_call_id="L1C1", reasoning="x"),),
+        re_diagnosis_candidates=(),
+        proposed_exprs={"L1C1": 'page.getByTestId("x")'},
+    )
+
+    result = Driver(store=store, tools=tools, diagnoser=diagnoser).run(str(test_file), "t")
+
+    attempts = store.list_attempts(result.run_id)
+    assert len(attempts) == 1
+    assert attempts[0].state_duration_ms >= 25

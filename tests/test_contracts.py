@@ -493,3 +493,44 @@ def probe_dom_path():
     from play_agent.tools import contracts
 
     return contracts._PROBE_SCRIPT_PATH
+
+
+# -- against a REAL Playwright report ---------------------------------------
+
+
+def _real_report_fixture(tmp_path):
+    from pathlib import Path as _Path
+
+    spec = tmp_path / "real.spec.ts"
+    spec.write_text("// spec")
+    report = _Path(__file__).parent / "data" / "playwright_real_failed_report.json"
+    return spec, report
+
+
+def test_parses_a_real_playwright_failure_report(tmp_path):
+    # tests/data/playwright_real_failed_report.json is genuine --reporter=json
+    # output (a nested describe, one retry), not a hand-written approximation
+    # of the documented shape.
+    spec, report = _real_report_fixture(tmp_path)
+
+    evidence = collect_failure_evidence(
+        str(spec), "completes checkout", report_path=str(report)
+    )
+
+    assert "Expected" in evidence.error_message
+    assert "Place order" in evidence.error_message
+    assert evidence.stack_trace
+
+
+def test_ansi_colour_codes_are_stripped_from_error_and_stack(tmp_path):
+    # Real Playwright messages are colourised; escape codes are noise to a
+    # model and corrupt logs.
+    spec, report = _real_report_fixture(tmp_path)
+
+    evidence = collect_failure_evidence(
+        str(spec), "completes checkout", report_path=str(report)
+    )
+
+    assert "\x1b[" not in evidence.error_message
+    assert "\x1b[" not in evidence.stack_trace
+    assert "expect(received).toBe(expected)" in evidence.error_message

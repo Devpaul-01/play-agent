@@ -11,6 +11,7 @@ should not require changing these signatures, only the bodies.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -119,11 +120,20 @@ def collect_failure_evidence(
     return FailureEvidence(
         test_file_path=test_file_path,
         test_title=test_title,
-        error_message=error.get("message", ""),
-        stack_trace=error.get("stack", ""),
+        error_message=_strip_ansi(error.get("message", "")),
+        stack_trace=_strip_ansi(error.get("stack", "")),
         screenshot_path=_find_attachment_path(attachments, "screenshot"),
         trace_path=_find_attachment_path(attachments, "trace"),
     )
+
+
+# Playwright colours its error messages with ANSI escape sequences. They are
+# noise to a language model and make logs unreadable, so they are stripped.
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE.sub("", text)
 
 
 def _default_report_path(test_file_path: Path) -> Path:

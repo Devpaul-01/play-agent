@@ -377,7 +377,7 @@ This section records where the code differs from, or has not yet met, the
 design above. §1–§23 describe the agreed design; this section describes
 reality. `docs/checklist.md` is the item-by-item tracker.
 
-**Status:** all components in M1–M5 exist and are unit-tested (191 tests).
+**Status:** all components in M1–M5 exist and are unit-tested (275 tests).
 The full pipeline has **not** been run end-to-end against a live Docker
 daemon and a real Groq key, so nothing below should be read as proven in
 operation.
@@ -399,38 +399,54 @@ operation.
 - **Orchestrator language and LLM provider.** Python and Groq; see §20 and
   ADR-12.
 
-### Deviations from the design
+### Deviations from the design, now closed
 
-- **`apply_patch` writes in place (§7).** §7 says the patch is written to
-  an isolated copy and the original working-tree file is never touched.
-  The implementation writes directly to the path it is given, on the
-  premise that the sandbox mount makes that path "the sandboxed copy".
-  `play-agent repair` does not arrange such a copy, so it currently edits
-  the real file. The evaluation runner is unaffected (it works on a
-  scratch copy of the whole app per scenario). **This is the most
-  important deviation to close.**
-- **The diff and report are not surfaced.** §2, §3 and §5 make a diff
-  plus a report the deliverable, and §19 specifies "a diff file plus a
-  markdown summary". `apply_patch` returns a unified diff, but the Driver
-  does not store it and the CLI neither prints it nor writes a diff file
-  or markdown summary, while the CLI's success message tells the user to
-  review one.
-- **Errors are not handled (§12).** `ToolError` and `DiagnoserError` are
-  not caught by the Driver or CLI, so a missing Playwright report or a
-  malformed model response is a traceback and leaves the run row
-  unfinished. The §12 split between transient and semantic retry paths is
-  not implemented; there is no retry layer around the Groq call beyond
-  the SDK's own defaults.
-- **`probe_live_dom` is incomplete (§7, M3).** The Python side is
-  implemented and tested against a fake sandbox. Its Node script,
-  `scripts/probe_dom.js`, is invoked at `/app/scripts/probe_dom.js`, but
-  the sandbox mounts only the app under test and an output directory, so
-  that path does not resolve to this repository's script. The Driver also
-  never calls the tool, so it contributes no diagnosis evidence.
-- **Evidence collection assumes a JSON reporter (§7).**
-  `collect_failure_evidence` reads Playwright's `--reporter=json` output.
-  The fixture app's config uses the `list` reporter, so a real run against
-  it fails at evidence collection until a JSON reporter is added there.
+- **Isolation (§7).** `apply_patch` wrote to the path it was given, so the
+  CLI edited the user's real file. `SandboxedToolBelt` now copies the app
+  into a `PatchWorkspace` and mounts that copy into the sandbox; the real
+  file is only read. The workspace file is reset to pristine before every
+  apply. This also fixed a latent bug: the Driver never reverted a failed
+  candidate, so candidate 2 was applied on top of candidate 1.
+- **The deliverable (§2, §3, §5, §19).** `repair` now writes
+  `<output_dir>/<run_id>/report.md` and, when a patch was verified,
+  `repair.diff` (a/ b/ paths relative to the app root, applying with
+  `git apply`), and prints the diff. `DriverResult` carries the verified
+  patch's diff and expression.
+- **Failure handling (§12).** `ToolError` and `DiagnoserError` finish the
+  run as `FAILED` with the reason recorded; any other exception finalizes
+  the run row and re-raises. Transient provider failures are retried by the
+  Groq SDK under an explicit policy (3 retries, 30s timeout) and surface as
+  `DiagnoserError` once exhausted; semantic retry stays the orchestrator's
+  candidate policy (§6).
+- **`probe_live_dom` (§7, M3).** Its script now ships in the package and is
+  delivered as `node -e`, because the sandbox mounts only the app and an
+  output directory. The old script also passed a whole Playwright
+  expression to an API expecting a CSS selector, so it could never have
+  matched; it now evaluates the candidate, but only after the same
+  allowlist/literal-argument validation `apply_patch` uses.
+- **Evidence collection (§7).** The fixture app now writes the JSON report
+  `collect_failure_evidence` reads (fixture commit `a968166`). The parser
+  was checked against genuine Playwright output, which showed its messages
+  are ANSI-coloured; the codes are now stripped.
+
+### Remaining deviations and gaps
+
+- **`probe_live_dom` is advisory and shallow.** It is opt-in, its result
+  only reaches the run log, and with no recorded actions to replay (nothing
+  derives them from the failing test) it sees only the app's landing page,
+  so a negative result is not authoritative. It does not feed diagnosis,
+  which §7/M3 envisage.
+- **The tool does not run the failing test itself.** Evidence comes from an
+  existing Playwright JSON report; the user must run their suite first.
+- **Sandbox verification against the fixture is untested.** The fixture's
+  config hard-codes `localhost` URLs and starts its own `webServer`s; how
+  that interacts with the container and `APP_UNDER_TEST_URL` is unexercised.
+  The fixture's own suite has not been verified green and has no baseline
+  tag.
+- **The workspace copies the whole app** (including `node_modules`) per
+  run; the ignore list is configurable only in code.
+- **Latency.** `state_duration_ms` is the verification step's duration, not
+  the whole attempt.
 
 ### Evaluation harness scope (§16)
 
@@ -444,5 +460,5 @@ operation.
   by the sandbox tests) and does not test whether injected evidence can
   steer a real model into proposing a malicious payload. That stronger
   claim is deferred.
-- The comparison runner is library-only; there is no CLI command, and no
-  benchmark results exist yet.
+- Both harnesses have CLI commands (`play-agent eval adversarial|benchmark`).
+  No benchmark results exist yet.

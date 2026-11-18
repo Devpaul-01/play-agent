@@ -10,9 +10,9 @@ structurally unable to touch assertions or test logic, not merely
 instructed not to. See `docs/architecture.md` for the full design and
 `docs/checklist.md` for exactly what is and isn't done.
 
-> **Status: all components implemented and unit-tested; the full pipeline
-> has not yet been run end-to-end against a live Docker daemon and a real
-> Groq key.** Read "Known limitations" before relying on it.
+> **Status: all components implemented and unit-tested (275 tests); the full
+> pipeline has not yet been run end-to-end against a live Docker daemon and
+> a real Groq key.** Read "Known limitations" before relying on it.
 
 ## How it works
 
@@ -32,10 +32,13 @@ propose repair        one exact replacement locator expression
 validate              tree-sitter AST check: allowlisted locator methods,
     |                 literal arguments only, must target a real locator call
     v
-apply + verify        patch applied, test re-run N times in a Docker sandbox
-    |
+apply + verify        patch applied to a scratch COPY of your app (your files
+    |                 are never touched); test re-run N times in a Docker sandbox
     v
 accept / retry / reject   every step recorded in SQLite and a JSON log
+    |
+    v
+report.md + repair.diff   you review the diff and apply it yourself
 ```
 
 The safety model has four layers (Sec8): the model only ever emits
@@ -70,10 +73,24 @@ All configuration is environment variables, read in exactly one place
 | `PLAY_AGENT_COMPONENT_SRC_ROOT` | no | unset | Frontend `src/` directory, e.g. `<app>/frontend/src`. Enables component-source evidence; omit it and diagnosis runs without. |
 | `PLAY_AGENT_DB_PATH` | no | `play_agent.sqlite3` | SQLite run/attempt store |
 | `PLAY_AGENT_LOG_PATH` | no | `play_agent.log` | JSON-lines run log |
+| `PLAY_AGENT_OUTPUT_DIR` | no | `play-agent-output` | Where each run's `report.md` and `repair.diff` are written |
 
 When `PLAY_AGENT_APP_HOST` is `localhost`/`127.0.0.1`/`0.0.0.0`, the
 sandbox rewrites it to `host.docker.internal` (mapped to the Docker host
 gateway), since `localhost` inside a container is the container itself.
+
+### Before you run it
+
+`play-agent repair` does **not** run your failing test itself: it reads the
+failure from Playwright's JSON report, so run your suite first and let it
+fail. The report is expected at `test-results/results.json` next to your
+`playwright.config.*`, which needs a JSON reporter:
+
+```ts
+reporter: [["list"], ["json", { outputFile: "test-results/results.json" }]],
+```
+
+The fixture app has this since commit `a968166`.
 
 The app under test is a **separate repository**
 ([`Devpaul-01/fixture`](https://github.com/Devpaul-01/fixture), a small
@@ -83,33 +100,56 @@ clones it; check it out and point `PLAY_AGENT_APP_PATH` at it.
 ## Usage
 
 ```bash
-uv run play-agent repair <test-file> "<test title>" [--reps N] [--log-path PATH]
+uv run play-agent repair <test-file> "<test title>" [--reps N] [--output-dir DIR] [--log-path PATH] [--probe-dom]
 ```
 
-- `<test-file>`: path to the Playwright spec containing the failing test
+- `<test-file>`: the Playwright spec containing the failing test. It must be
+  inside the app at `PLAY_AGENT_APP_PATH`.
 - `<test title>`: the test's title exactly as Playwright reports it
 - `--reps`: verification re-runs before a fix is trusted as non-flaky (default 3)
-- `--log-path`: override the log file
+- `--output-dir`: where the report and diff go (default `play-agent-output`)
+- `--log-path`: override the run log
+- `--probe-dom`: also check each proposed locator against the live app and
+  record the result in the run log. Advisory only; it never changes the
+  outcome, and it probes only the app's landing page (nothing is replayed).
 
-Exit code is `0` only when the run reaches `SUCCEEDED`; a failed or
-rejected repair, a sandbox error, or a configuration error exits `1`.
+**Your test file is never modified and nothing is committed.** The tool works
+on a scratch copy of the app. Each run writes `<output-dir>/<run-id>/`:
+
+- `report.md`: the outcome, the reason, every candidate tried with its
+  verification result, and the diff
+- `repair.diff`: only when a repair was verified. Its paths are relative to
+  the app root, so apply it from there: `git apply <path>/repair.diff`
+
+Exit code is `0` only when the run reaches `SUCCEEDED`. A failed or rejected
+repair, a sandbox error, or a configuration error exits `1`. An infrastructure
+failure (a missing Playwright report, an unreachable or malformed model
+response) ends the run as `FAILED` with the reason recorded, distinct from
+`REJECTED`, which means the failure was diagnosed as not locator-repairable.
 
 ## Evaluation harness
 
 `src/play_agent/eval/` measures repair quality against known ground truth
-(Sec16). It is **library code with no CLI entry point yet**.
+(Sec16).
 
-- `mutations.py` / `benchmark.py`: controlled mutations of the fixture
-  app's component source (attribute rename, element removal), each mapped
-  to a real fixture test, with the correct repair recorded as ground truth
-- `metrics.py`: success rate, false-repair rate, correct-rejection rate,
-  candidates-tried-per-success, re-diagnosis rate, cost and latency
-- `runner.py`: `run_comparison(...)` runs every scenario against each
-  `DiagnosisConfiguration` (e.g. two Groq models) and reports metrics per
-  configuration
-- `adversarial.py`: a separate, named adversarial suite. Run
-  `print(format_results_table(run_adversarial_suite()))` for the
-  attack -> blocked -> layer table. This one needs no Docker or API key.
+```bash
+uv run play-agent eval adversarial                     # no Docker or API key needed
+uv run play-agent eval benchmark --model <a> --model <b> [--reps N] [--output results.json]
+```
+
+- `eval adversarial` prints the attack -> blocked -> layer table and exits 1
+  if any attack was not blocked.
+- `eval benchmark` runs every scenario once per `--model` through the **real
+  pipeline** (it spends Docker time and Groq credit) and prints a per-model
+  comparison. Repeat `--model` to compare; Sec16 asks for at least two. A
+  rate over an empty denominator prints `n/a`, and scenarios that could not
+  run are listed with their reason rather than silently dropped.
+
+The pieces: `mutations.py` / `benchmark.py` (controlled mutations of the
+fixture app's component source, each mapped to a real fixture test, with the
+correct repair as ground truth); `metrics.py` (success, false-repair,
+correct-rejection, candidates-per-success, re-diagnosis rate, cost,
+latency); `runner.py` (`run_comparison_with_details`); `adversarial.py`.
 
 ## Project layout
 
@@ -118,12 +158,14 @@ src/play_agent/
   cli/            the `play-agent` command
   orchestrator/   state machine, Driver run loop, Groq diagnoser
   tools/          tool contracts, AST patch validation, component-source
-                  resolution, the sandboxed tool belt
+                  resolution, the isolated patch workspace, the sandboxed
+                  tool belt, and probe_dom.js (run inside the sandbox)
   sandbox/        per-run Docker container lifecycle
   store/          SQLite runs/attempts
   observability/  JSON run logging and redaction
   eval/           benchmark, metrics, comparison runner, adversarial suite
-scripts/          probe_dom.js (see limitations), a Groq smoke test
+  report.py       the per-run report.md / repair.diff
+scripts/          a Groq smoke test
 docs/             architecture.md (the design), checklist.md (the status)
 ```
 
@@ -143,28 +185,30 @@ job that exercises a real Docker daemon.
 These are real, current gaps, not future ideas:
 
 1. **Never run end-to-end for real.** No live Docker + live Groq run has
-   happened. Unit tests use fakes for both.
-2. **Fixture reporter mismatch.** The fixture's Playwright config uses the
-   `list` reporter; `collect_failure_evidence` reads Playwright's JSON
-   report (`test-results/results.json`). Add a JSON reporter to the
-   fixture's `playwright.config.ts` before a real run.
-3. **`repair` edits the test file in place** and **never prints or saves
-   the diff**, although its success message tells you to review one. The
-   design says the original working-tree file is never touched (Sec7) and
-   that a diff file plus a markdown summary is the deliverable (Sec19). Until that's fixed, run the agent on a
-   throwaway copy or a clean git working tree and use `git diff`.
-4. **Unhandled errors.** A missing Playwright report (`ToolError`) or a
-   malformed model response (`DiagnoserError`) is not caught by the Driver
-   or CLI; you get a traceback and the run row is left unfinished.
-5. **`probe_live_dom` is not usable.** It is implemented and unit-tested
-   against a fake sandbox, but `scripts/probe_dom.js` is never mounted
-   into the container, and the Driver never calls it.
-6. **No explicit transient-retry layer** around Groq calls (Sec12).
-7. **Benchmark coverage.** Two of the four planned mutation types; no
+   happened. Unit tests use fakes for both, plus one test that runs the
+   probe script under real `node` against a stand-in `playwright`.
+2. **The fixture's suite is unverified and untagged.** I could not run it in
+   the environment that built this (no browser download), so there is no
+   known-green baseline tag. Run `npm test` in the fixture, and if it is
+   green: `git tag -a baseline-green -m "known-green baseline"`.
+3. **How the sandbox verifies against the fixture is untested.** Verification
+   runs `npx playwright test` inside a container whose working directory is a
+   copy of the app. The fixture's config hard-codes `localhost` URLs and
+   starts its own `webServer`s, and how that behaves in the container
+   (versus `APP_UNDER_TEST_URL`) has not been exercised.
+4. **`--probe-dom` is advisory and shallow.** It only sees the app's landing
+   page, because nothing derives the actions to replay from the failing
+   test. It never gates or influences a repair.
+5. **The workspace copies the whole app**, `node_modules` included, per run.
+   It is configurable only in code (`SandboxedToolBeltConfig.workspace_ignore`),
+   not from the CLI or environment.
+6. **Benchmark coverage.** Two of the four planned mutation types, and no
    benchmark numbers have been produced.
-8. **Adversarial suite scope.** It proves the validation layer rejects
+7. **Adversarial suite scope.** It proves the validation layer rejects
    malicious payloads. It does not prove injected page content can't
    influence what a real model proposes.
+8. **Latency is verification time only.** `state_duration_ms` on an attempt
+   is the time spent verifying, not the whole attempt.
 
 ## License
 

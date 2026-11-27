@@ -1,0 +1,130 @@
+name: E2E
+
+on:
+  push:
+    branches: [main, ci/e2e-sandbox-verification]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # Step-level `if` cannot read secrets directly; expose presence only.
+      HAS_GROQ_KEY: ${{ secrets.PLAY_AGENT_GROQ_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the fixture app
+        uses: actions/checkout@v4
+        with:
+          repository: Devpaul-01/fixture
+          path: fixture-src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install play-agent
+        run: |
+          uv python install 3.11
+          uv sync --all-extras
+
+      - name: Install fixture dependencies
+        working-directory: fixture-src
+        run: |
+          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund --prefix backend
+          npm install --no-audit --no-fund --prefix frontend
+
+      - name: Build the sandbox image
+        run: |
+          PW_VERSION=$(node -p "require('./fixture-src/node_modules/@playwright/test/package.json').version")
+          echo "Playwright version: $PW_VERSION"
+          docker build -f docker/sandbox.Dockerfile \
+            --build-arg PLAYWRIGHT_VERSION="$PW_VERSION" \
+            -t play-agent-sandbox:latest .
+
+      - name: Sandbox image smoke check
+        run: |
+          docker run --rm play-agent-sandbox:latest node --version
+          docker run --rm play-agent-sandbox:latest npx playwright --version
+
+      - name: Install Chromium on the runner
+        working-directory: fixture-src
+        run: npx playwright install --with-deps chromium
+
+      - name: Fixture baseline is green (unmutated)
+        working-directory: fixture-src
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          npx playwright test --reporter=line 2>&1 | tee "$RUNNER_TEMP/logs/01-baseline.log"
+
+      - name: Prepare mutated fixture copy
+        run: uv run python scripts/e2e_prepare_fixture.py fixture-src "$RUNNER_TEMP/app-under-test"
+
+      - name: Produce the failing Playwright report
+        working-directory: ${{ runner.temp }}/app-under-test
+        run: |
+          set +e
+          npx playwright test tests/auth.spec.ts -g "shows an error on invalid credentials" \
+            2>&1 | tee "$RUNNER_TEMP/logs/02-mutated.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "playwright exit status: $status"
+          test "$status" -ne 0 || { echo "expected the mutated test to fail"; exit 1; }
+          test -f test-results/results.json
+
+      - name: End-to-end test (real sandbox, scripted diagnoser)
+        env:
+          PLAY_AGENT_E2E: "1"
+          E2E_APP_PATH: ${{ runner.temp }}/app-under-test
+          PLAY_AGENT_SANDBOX_IMAGE: play-agent-sandbox:latest
+        run: uv run pytest tests/e2e -v 2>&1 | tee "$RUNNER_TEMP/logs/03-e2e.log"
+
+      - name: Full CLI run with the real Groq model
+        if: env.HAS_GROQ_KEY == 'true'
+        env:
+          PLAY_AGENT_GROQ_API_KEY: ${{ secrets.PLAY_AGENT_GROQ_API_KEY }}
+          PLAY_AGENT_APP_PATH: ${{ runner.temp }}/app-under-test
+          PLAY_AGENT_APP_HOST: localhost
+          PLAY_AGENT_APP_PORT: "5173"
+          PLAY_AGENT_COMPONENT_SRC_ROOT: ${{ runner.temp }}/app-under-test/frontend/src
+          PLAY_AGENT_SANDBOX_IMAGE: play-agent-sandbox:latest
+          PLAY_AGENT_OUTPUT_DIR: ${{ runner.temp }}/play-agent-output
+          PLAY_AGENT_DB_PATH: ${{ runner.temp }}/play_agent.sqlite3
+          PLAY_AGENT_LOG_PATH: ${{ runner.temp }}/play_agent.log
+        run: |
+          uv run play-agent repair \
+            "$RUNNER_TEMP/app-under-test/tests/auth.spec.ts" \
+            "shows an error on invalid credentials" --reps 3 2>&1 | tee "$RUNNER_TEMP/logs/04-cli.log"
+
+      - name: Note when the Groq step was skipped
+        if: env.HAS_GROQ_KEY != 'true'
+        run: echo "::notice::Groq CLI step skipped - add the PLAY_AGENT_GROQ_API_KEY repository secret to enable it."
+
+      - name: Surface failing step output as annotations
+        if: failure()
+        run: |
+          for f in "$RUNNER_TEMP"/logs/*.log; do
+            [ -f "$f" ] || continue
+            body=$(tail -n 70 "$f" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-300 | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
+            echo "::error title=$(basename "$f")::$body"
+          done
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/play-agent-output
+            ${{ runner.temp }}/play_agent.log
+            ${{ runner.temp }}/app-under-test/test-results
